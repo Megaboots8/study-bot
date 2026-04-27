@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "study-bot"
+version = "0.1.0"
+description = "Automated Reddit poster and survey reporter for science and marketing studies"
+requires-python = ">=3.10"
+dependencies = [
+    "google-api-python-client>=2.120.0",
+    "google-auth>=2.29.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+study-bot = "study_bot.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
