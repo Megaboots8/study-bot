@@ -1,6 +1,21 @@
 # study-bot
 
-Checks survey response counts and sends Telegram notifications. Later will add scheduling human-approved reddit posts with survey links to survey-friendly subreddits.
+Checks survey response counts and sends Telegram notifications. Later will add scheduling human-approved reddit posts with survey links to survey-friendly subreddits as follows:
+
+Human-Approved Survey Scheduler
+
+This is a private Python/PRAW scheduler for preparing and submitting survey posts to an allowlist of survey-friendly subreddits.
+
+The tool:
+- requires human approval before posting;
+- posts only from a dedicated survey-posting Reddit account;
+- uses subreddit allowlists;
+- enforces cooldowns and daily caps;
+- logs each submitted post;
+- does not vote, send DMs, scrape/sell data, manipulate karma, evade bans, or bypass subreddit rules;
+- integrates with Google Sheets/MySQL only to check aggregate survey response counts before posting.
+
+No Reddit credentials, database credentials, API keys, or private survey data are stored in this repository.
 
 ## Setup
 
