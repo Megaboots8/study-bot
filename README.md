@@ -31,6 +31,15 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 GOOGLE_SHEET_ID=your_google_sheet_id_here
 GOOGLE_CREDENTIALS_FILE=credentials.json
 GOOGLE_TOKEN_FILE=token.json
+
+SSH_HOST=your_ssh_hostname
+SSH_USER=your_ssh_username
+SSH_PASSWORD=your_ssh_password
+SSH_PORT=22
+MYSQL_HOST=your_mysql_hostname
+MYSQL_PORT=3306
+MYSQL_USER=your_mysql_username
+MYSQL_PASSWORD=your_mysql_password
 ```
 
 Make sure `credentials.json` (your Google OAuth client secrets file) is in the project root.
@@ -57,7 +66,39 @@ For each configured survey:
 - Sends a Telegram message: `"<Survey Name> # of responses = X"`.
 - On error: sends `"[study-bot ERROR] <Survey Name>: <error details>"`.
 
+After the survey check, for each configured experiment:
+- Opens an SSH tunnel to the database server in-process (no manual tunnel needed, works after reboot).
+- Queries the experiment table for total row count and `is_complete = 1` count.
+- Sends a single Telegram message with both metrics and deltas vs. the last run:
+
+```
+qs_colorslider_v5 (experiment_submissions)
+Total rows = 152 (increased by 1)
+Complete (is_complete=1) = 88 (no change)
+```
+
 Every run appends a timestamped entry to `logs/study-bot.log`.
+
+## Adding an experiment
+
+Edit `EXPERIMENTS` in `src/study_bot/config.py`:
+
+```python
+EXPERIMENTS = [
+    {
+        "label": "qs_colorslider_v5",
+        "database": "qs_colorslider_v5",
+        "table": "experiment_submissions",
+    },
+    {
+        "label": "another_experiment",
+        "database": "another_db",
+        "table": "experiment_submissions",
+    },
+]
+```
+
+The SSH/MySQL credentials in `.env` are shared across all experiments (all on the same server). Each experiment uses its own `database` name.
 
 ## Adding a survey
 
