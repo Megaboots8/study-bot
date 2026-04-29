@@ -1,6 +1,6 @@
 # study-bot
 
-Checks survey response counts and sends Telegram notifications. Designed to grow into a full automated Reddit poster for science and marketing studies.
+Checks survey response counts and sends Telegram notifications. Later will add scheduling human-approved reddit posts with survey links to survey-friendly subreddits.
 
 ## Setup
 
