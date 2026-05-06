@@ -2,10 +2,11 @@ import json
 import traceback
 from pathlib import Path
 
-from .config import EXPERIMENTS, SURVEYS
+from .config import EXPERIMENTS, REDDIT_POSTS, SURVEYS
 from .database import get_experiment_counts
 from .logger import get_logger
 from .notify import send_telegram
+from .reddit_post import prefill as reddit_prefill
 from .sheets import get_response_count
 
 _STATE_FILE = Path(__file__).resolve().parents[2] / "logs" / "last_counts.json"
@@ -74,6 +75,20 @@ def main() -> None:
                 send_telegram(message)
             except Exception:
                 log.error("Failed to send Telegram success notification\n%s", traceback.format_exc())
+
+            # Reddit pre-fill: open a new tab with title (and optional body) pre-filled.
+            post_cfg = REDDIT_POSTS.get(label)
+            if post_cfg:
+                try:
+                    reddit_prefill(
+                        subreddit=post_cfg["subreddit"],
+                        title=post_cfg["title"],
+                        body=post_cfg.get("body", ""),
+                        flair=post_cfg.get("flair", ""),
+                        auto_click_add=bool(post_cfg.get("auto_click_add", False)),
+                    )
+                except Exception:
+                    log.warning("Reddit pre-fill skipped for '%s'\n%s", label, traceback.format_exc())
 
         except Exception as e:
             log.error("Error processing survey '%s'\n%s", label, traceback.format_exc())

@@ -17,6 +17,10 @@ dependencies = [
     "sshtunnel>=0.4.0",
     "pymysql>=1.1.0",
     "paramiko>=2.7.2,<4.0",
+    "pyyaml>=6.0",
+    "pyautogui>=0.9.54",
+    "Pillow>=10.0",
+    "numpy>=1.24",
 ]
 
 [project.scripts]

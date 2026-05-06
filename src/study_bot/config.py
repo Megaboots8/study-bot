@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from .reddit_config import REDDIT_POSTS
 
 load_dotenv()
 

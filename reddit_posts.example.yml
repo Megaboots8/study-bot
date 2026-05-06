@@ -1,0 +1,26 @@
+# Reddit pre-fill configuration template.
+# Copy this file to reddit_posts.yml, fill in your real post text, and
+# do NOT commit reddit_posts.yml (it is in .gitignore).
+#
+# Top-level key under "posts:" must exactly match the "label" field of the
+# corresponding survey in src/study_bot/config.py.
+#
+# Fields used today:   subreddit, title, body, flair, auto_click_add
+#
+# `flair` only takes effect if you have installed the Tampermonkey userscript
+# at userscripts/reddit-auto-flair.user.js (see README); otherwise it is
+# silently passed through and ignored by Reddit.
+#
+# `auto_click_add: true` additionally has study-bot scan the screen for the
+# flair dialog's blue "Add" button and click it via an OS-level mouse event.
+# This commits the flair selection (Reddit ignores synthetic clicks for
+# that final step).  Leave it false if you would rather click "Add"
+# yourself.
+
+posts:
+  Photo Filter Preference Survey:
+    subreddit: SampleSize
+    title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
+    body: ""                       # optional self-text body (empty disables it)
+    flair: "Academic (Repost)"     # exact flair text to click; "" to leave manual
+    auto_click_add: true           # OS-level click on dialog's blue "Add" button

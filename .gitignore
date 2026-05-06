@@ -8,3 +8,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Reddit pre-fill: real post content (never commit)
+reddit_posts.yml
