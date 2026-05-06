@@ -61,43 +61,53 @@ Make sure `credentials.json` (your Google OAuth client secrets file) is in the p
 
 **4. Run**
 
-```powershell
-study-bot
-```
-
-or
+study-bot has two modes — pick the one matching the study you want to
+check and post:
 
 ```powershell
-python -m study_bot
+study-bot survey       # Google Sheets surveys + their Reddit posts
+study-bot experiment   # MySQL experiments + their Reddit posts
 ```
 
-The **first run** opens a browser window to authorize Google Sheets access. After you approve, `token.json` is saved and subsequent runs are fully silent.
+(or `python -m study_bot survey` / `python -m study_bot experiment`)
 
-## What it does
+The repo also ships two batch wrappers, `run-study-bot-survey.bat` and
+`run-study-bot-experiment.bat`, plus desktop shortcuts named
+`study-bot (survey)` and `study-bot (experiment)`.
 
-For each configured survey:
+The **first run in survey mode** opens a browser window to authorize
+Google Sheets access. After you approve, `token.json` is saved and
+subsequent runs are fully silent.
+
+## What each mode does
+
+### `study-bot survey`
+
+For each configured survey in `SURVEYS`:
 - Reads column A of the `Form Responses 1` sheet.
 - Computes `response_count = len(rows) - 1` (skips the header row).
-- Sends a Telegram message: `"<Survey Name> # of responses = X"`.
+- Sends a Telegram message: `"<Survey Name> # of responses = X (increased by N)"`.
+- For every entry under that survey's label in `reddit_posts.yml`,
+  opens a Reddit submit tab pre-filled with title, link/body, and flair
+  (see "Reddit pre-fill setup" below).
 - On error: sends `"[study-bot ERROR] <Survey Name>: <error details>"`.
 
-After the survey check, for each configured experiment:
-- Opens an SSH tunnel to the database server in-process (no manual tunnel needed, works after reboot).
-- Queries the experiment table for total row count and `is_complete = 1` count.
-- Sends a single Telegram message with both metrics and deltas vs. the last run:
+### `study-bot experiment`
 
-```
-qs_colorslider_v5 (experiment_submissions)
-Total rows = 152 (increased by 1)
-Complete (is_complete=1) = 88 (no change)
-```
+For each configured experiment in `EXPERIMENTS`:
+- Opens an SSH tunnel to the database server in-process (no manual
+  tunnel needed, works after reboot).
+- Queries the experiment table for total row count and
+  `training_termination_reason = 'completed'` count.
+- Sends a single Telegram message with both metrics and deltas:
 
-After the survey check, for each survey that has an entry in `reddit_posts.yml`:
-- Opens a new tab in your default browser pointed at `https://www.reddit.com/r/<subreddit>/submit?title=...` with Reddit's officially-supported URL parameters.
-- The Title field on the submit page is pre-filled.  Optional `body` text in the YAML is pre-filled into the self-text field.
-- You review the post, pick a flair, and click **Post** by hand.
+  ```
+  qs_colorslider_v5 total rows = 488 (increased by 4)
+  Completed = 140 (increased by 1)
+  ```
 
-This uses the same `?title=...&text=...` URL contract that every "Share to Reddit" button on the web uses, so there is no browser automation, no automation fingerprints, and no Chrome-profile management.
+- For every entry under that experiment's label in `reddit_posts.yml`,
+  opens a Reddit submit tab the same way as for surveys.
 
 Every run appends a timestamped entry to `logs/study-bot.log`.
 

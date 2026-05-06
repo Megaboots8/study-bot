@@ -1,4 +1,6 @@
+import argparse
 import json
+import sys
 import traceback
 from pathlib import Path
 
@@ -54,13 +56,36 @@ def _build_experiment_message(
     return f"{total_line}\n{complete_line}"
 
 
-def main() -> None:
-    log = get_logger()
-    log.info("study-bot run started")
+def _open_reddit_posts_for(label: str, log) -> None:
+    """Open every configured Reddit submit tab for the given label.
 
-    last_counts = _load_last_counts()
-    updated_counts = dict(last_counts)
+    Schema accepts either a single dict (legacy) or a list of dicts so a
+    single survey/experiment can post to multiple subreddits.  Failures
+    in one entry never stop the next one.
+    """
+    post_cfg = REDDIT_POSTS.get(label)
+    if not post_cfg:
+        return
+    post_list = post_cfg if isinstance(post_cfg, list) else [post_cfg]
+    for one_post in post_list:
+        try:
+            reddit_prefill(
+                subreddit=one_post["subreddit"],
+                title=one_post["title"],
+                post_type=one_post.get("post_type", "link"),
+                link_url=one_post.get("link_url", ""),
+                body=one_post.get("body", ""),
+                flair=one_post.get("flair", ""),
+                auto_click_add=bool(one_post.get("auto_click_add", False)),
+            )
+        except Exception:
+            log.warning(
+                "Reddit pre-fill skipped for '%s' -> r/%s\n%s",
+                label, one_post.get("subreddit", "?"), traceback.format_exc(),
+            )
 
+
+def _run_surveys(log, last_counts: dict, updated_counts: dict) -> None:
     for survey in SURVEYS:
         label = survey["label"]
         sheet_id = survey["sheet_id"]
@@ -76,28 +101,7 @@ def main() -> None:
             except Exception:
                 log.error("Failed to send Telegram success notification\n%s", traceback.format_exc())
 
-            # Reddit pre-fill: open one or more submit tabs for this survey.
-            # Schema accepts either a single dict (legacy) or a list of
-            # dicts so a single survey can post to multiple subreddits.
-            post_cfg = REDDIT_POSTS.get(label)
-            if post_cfg:
-                post_list = post_cfg if isinstance(post_cfg, list) else [post_cfg]
-                for one_post in post_list:
-                    try:
-                        reddit_prefill(
-                            subreddit=one_post["subreddit"],
-                            title=one_post["title"],
-                            post_type=one_post.get("post_type", "link"),
-                            link_url=one_post.get("link_url", ""),
-                            body=one_post.get("body", ""),
-                            flair=one_post.get("flair", ""),
-                            auto_click_add=bool(one_post.get("auto_click_add", False)),
-                        )
-                    except Exception:
-                        log.warning(
-                            "Reddit pre-fill skipped for '%s' -> r/%s\n%s",
-                            label, one_post.get("subreddit", "?"), traceback.format_exc(),
-                        )
+            _open_reddit_posts_for(label, log)
 
         except Exception as e:
             log.error("Error processing survey '%s'\n%s", label, traceback.format_exc())
@@ -107,6 +111,8 @@ def main() -> None:
             except Exception:
                 log.error("Failed to send Telegram error notification\n%s", traceback.format_exc())
 
+
+def _run_experiments(log, last_counts: dict, updated_counts: dict) -> None:
     for experiment in EXPERIMENTS:
         label = experiment["label"]
         database = experiment["database"]
@@ -131,6 +137,8 @@ def main() -> None:
             except Exception:
                 log.error("Failed to send Telegram notification for '%s'\n%s", label, traceback.format_exc())
 
+            _open_reddit_posts_for(label, log)
+
         except Exception as e:
             log.error("Error processing experiment '%s'\n%s", label, traceback.format_exc())
             error_message = f"[study-bot ERROR] {label}: {e}"
@@ -138,6 +146,42 @@ def main() -> None:
                 send_telegram(error_message)
             except Exception:
                 log.error("Failed to send Telegram error notification\n%s", traceback.format_exc())
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="study-bot",
+        description=(
+            "Check survey / experiment counts, send a Telegram update, and "
+            "open Reddit submit tabs pre-filled with the configured posts."
+        ),
+    )
+    parser.add_argument(
+        "mode",
+        choices=["survey", "experiment"],
+        help=(
+            "survey: run Google Sheets surveys + their Reddit posts. "
+            "experiment: run MySQL experiments + their Reddit posts."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    log = get_logger()
+    log.info("study-bot run started (mode=%s)", args.mode)
+
+    last_counts = _load_last_counts()
+    updated_counts = dict(last_counts)
+
+    if args.mode == "survey":
+        _run_surveys(log, last_counts, updated_counts)
+    elif args.mode == "experiment":
+        _run_experiments(log, last_counts, updated_counts)
+    else:
+        log.error("Unknown mode: %s", args.mode)
+        sys.exit(2)
 
     _save_last_counts(updated_counts)
     log.info("study-bot run finished")

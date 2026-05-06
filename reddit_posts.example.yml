@@ -3,7 +3,9 @@
 # do NOT commit reddit_posts.yml (it is in .gitignore).
 #
 # Top-level key under "posts:" must exactly match the "label" field of
-# the corresponding survey in src/study_bot/config.py.
+# either a survey in SURVEYS or an experiment in EXPERIMENTS in
+# src/study_bot/config.py.  Surveys are processed by `study-bot survey`
+# and experiments are processed by `study-bot experiment`.
 #
 # The value is a LIST of post specs, so a single survey can be posted
 # to multiple subreddits (each with its own flair).  A single dict (no
@@ -24,7 +26,7 @@
 #                                  Default: false.
 
 posts:
-  # One survey, two subreddits.
+  # Survey (keyed by SURVEYS label) — opened by `study-bot survey`.
   Photo Filter Preference Survey:
     - subreddit: SampleSize
       title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
@@ -39,6 +41,23 @@ posts:
       link_url: "https://forms.gle/your-survey-here"
       body: "Short pitch shown in the optional body field of the link post."
       flair: "Personal"
+      auto_click_add: true
+
+  # Experiment (keyed by EXPERIMENTS label) — opened by `study-bot experiment`.
+  qs_colorslider_v5:
+    - subreddit: SampleSize
+      title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
+      post_type: link
+      link_url: "https://example.org/your-experiment"
+      body: "Short pitch shown in the optional body field of the link post."
+      flair: "Academic (Repost)"
+      auto_click_add: true
+    - subreddit: takemysurvey
+      title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
+      post_type: link
+      link_url: "https://example.org/your-experiment"
+      body: "Short pitch shown in the optional body field of the link post."
+      flair: "Academic-Personal"
       auto_click_add: true
 
   # Example: a text post.  Uncomment and adapt for self-text recruitment.
