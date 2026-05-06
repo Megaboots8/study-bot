@@ -76,19 +76,28 @@ def main() -> None:
             except Exception:
                 log.error("Failed to send Telegram success notification\n%s", traceback.format_exc())
 
-            # Reddit pre-fill: open a new tab with title (and optional body) pre-filled.
+            # Reddit pre-fill: open one or more submit tabs for this survey.
+            # Schema accepts either a single dict (legacy) or a list of
+            # dicts so a single survey can post to multiple subreddits.
             post_cfg = REDDIT_POSTS.get(label)
             if post_cfg:
-                try:
-                    reddit_prefill(
-                        subreddit=post_cfg["subreddit"],
-                        title=post_cfg["title"],
-                        body=post_cfg.get("body", ""),
-                        flair=post_cfg.get("flair", ""),
-                        auto_click_add=bool(post_cfg.get("auto_click_add", False)),
-                    )
-                except Exception:
-                    log.warning("Reddit pre-fill skipped for '%s'\n%s", label, traceback.format_exc())
+                post_list = post_cfg if isinstance(post_cfg, list) else [post_cfg]
+                for one_post in post_list:
+                    try:
+                        reddit_prefill(
+                            subreddit=one_post["subreddit"],
+                            title=one_post["title"],
+                            post_type=one_post.get("post_type", "link"),
+                            link_url=one_post.get("link_url", ""),
+                            body=one_post.get("body", ""),
+                            flair=one_post.get("flair", ""),
+                            auto_click_add=bool(one_post.get("auto_click_add", False)),
+                        )
+                    except Exception:
+                        log.warning(
+                            "Reddit pre-fill skipped for '%s' -> r/%s\n%s",
+                            label, one_post.get("subreddit", "?"), traceback.format_exc(),
+                        )
 
         except Exception as e:
             log.error("Error processing survey '%s'\n%s", label, traceback.format_exc())

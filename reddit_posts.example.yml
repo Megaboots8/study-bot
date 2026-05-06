@@ -2,25 +2,52 @@
 # Copy this file to reddit_posts.yml, fill in your real post text, and
 # do NOT commit reddit_posts.yml (it is in .gitignore).
 #
-# Top-level key under "posts:" must exactly match the "label" field of the
-# corresponding survey in src/study_bot/config.py.
+# Top-level key under "posts:" must exactly match the "label" field of
+# the corresponding survey in src/study_bot/config.py.
 #
-# Fields used today:   subreddit, title, body, flair, auto_click_add
+# The value is a LIST of post specs, so a single survey can be posted
+# to multiple subreddits (each with its own flair).  A single dict (no
+# leading "-") is also accepted for backward compatibility.
 #
-# `flair` only takes effect if you have installed the Tampermonkey userscript
-# at userscripts/reddit-auto-flair.user.js (see README); otherwise it is
-# silently passed through and ignored by Reddit.
-#
-# `auto_click_add: true` additionally has study-bot scan the screen for the
-# flair dialog's blue "Add" button and click it via an OS-level mouse event.
-# This commits the flair selection (Reddit ignores synthetic clicks for
-# that final step).  Leave it false if you would rather click "Add"
-# yourself.
+# Per-post fields:
+#   subreddit       (required)  — subreddit name without "r/"
+#   title           (required)  — Post title
+#   post_type       (optional)  — "link" (default) or "text"
+#   link_url        (link only) — URL filled into the Link URL field
+#   body            (optional)  — Body text (self-text for text posts,
+#                                  optional body for link posts)
+#   flair           (optional)  — Exact flair text; requires the
+#                                  Tampermonkey userscript (see README)
+#   auto_click_add  (optional)  — When true, study-bot OS-clicks the
+#                                  blue "Add" button in the flair dialog
+#                                  to commit the flair selection.
+#                                  Default: false.
 
 posts:
+  # One survey, two subreddits.
   Photo Filter Preference Survey:
-    subreddit: SampleSize
-    title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
-    body: ""                       # optional self-text body (empty disables it)
-    flair: "Academic (Repost)"     # exact flair text to click; "" to leave manual
-    auto_click_add: true           # OS-level click on dialog's blue "Add" button
+    - subreddit: SampleSize
+      title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
+      post_type: link
+      link_url: "https://forms.gle/your-survey-here"
+      body: "Short pitch shown in the optional body field of the link post."
+      flair: "Marketing (Repost)"
+      auto_click_add: true
+    - subreddit: takemysurvey
+      title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
+      post_type: link
+      link_url: "https://forms.gle/your-survey-here"
+      body: "Short pitch shown in the optional body field of the link post."
+      flair: "Personal"
+      auto_click_add: true
+
+  # Example: a text post.  Uncomment and adapt for self-text recruitment.
+  # Some Other Survey:
+  #   - subreddit: SampleSize
+  #     title: "Quick anonymous survey on X (≈3 min)"
+  #     post_type: text
+  #     body: |
+  #       Hi r/SampleSize, we're running a brief study on X.
+  #       Survey link in comments. Thanks!
+  #     flair: "Academic (Repost)"
+  #     auto_click_add: true

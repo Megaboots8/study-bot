@@ -114,12 +114,32 @@ Set the `subreddit` and `title` for each survey.  The top-level key under `posts
 ```yaml
 posts:
   Photo Filter Preference Survey:
-    subreddit: SampleSize
-    title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
-    body: ""                       # optional self-text body
-    flair: "Academic (Repost)"     # exact flair text; requires the userscript below
-    auto_click_add: true           # OS-level click on the dialog's "Add" button
+    - subreddit: SampleSize
+      title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
+      post_type: link                       # "link" (default) or "text"
+      link_url: "https://forms.gle/your-survey-here"
+      body: "Short pitch shown in the optional body field."
+      flair: "Marketing (Repost)"           # exact flair text; requires the userscript below
+      auto_click_add: true                  # OS-level click on the dialog's "Add" button
+    - subreddit: takemysurvey
+      title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
+      post_type: link
+      link_url: "https://forms.gle/your-survey-here"
+      body: "Short pitch shown in the optional body field."
+      flair: "Personal"
+      auto_click_add: true
 ```
+
+The value under each survey label is a **list** of post specs, so a
+single survey can post to multiple subreddits (each with its own flair).
+A single dict (no leading `-`) is also accepted for backward
+compatibility.
+
+`post_type: link` opens Reddit's submit page on the **Link** tab and
+pre-fills the **Link URL** field via the standard `?url=...&type=LINK`
+URL parameters.  `post_type: text` opens the **Text** tab with the
+optional `body` filled in via `?text=...&selftext=true`.  The same
+`flair` + auto-click flow works for both.
 
 If `reddit_posts.yml` does not exist, or a survey has no entry in it, the pre-fill step is silently skipped for that survey.
 
