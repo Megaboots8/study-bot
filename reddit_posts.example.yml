@@ -8,8 +8,7 @@
 # and experiments are processed by `study-bot experiment`.
 #
 # The value is a LIST of post specs, so a single survey can be posted
-# to multiple subreddits (each with its own flair).  A single dict (no
-# leading "-") is also accepted for backward compatibility.
+# to multiple subreddits, each with its own flair and scheduled time.
 #
 # Per-post fields:
 #   subreddit       (required)  — subreddit name without "r/"
@@ -24,6 +23,27 @@
 #                                  blue "Add" button in the flair dialog
 #                                  to commit the flair selection.
 #                                  Default: false.
+#   auto_post       (optional)  — When true (and auto_click_add is also
+#                                  true), study-bot additionally OS-clicks
+#                                  the composer's "Post" button and, if
+#                                  Reddit shows a rule-warning dialog,
+#                                  clicks "Submit without editing".
+#                                  Default: false.
+#   schedule        (optional)  — When set, the post waits until the
+#                                  next occurrence of this slot before
+#                                  opening.  Posts are run in
+#                                  chronological order; the survey /
+#                                  experiment check fires at the FIRST
+#                                  post's scheduled time.  Format:
+#                                      schedule:
+#                                        weekday: thursday   # mon|tue|...
+#                                        hour: 16
+#                                        minute: 5
+#                                        tz: America/New_York   # optional
+#                                  Falls back to the global default
+#                                  (see _DEFAULT_SCHEDULE_* in
+#                                  src/study_bot/__main__.py) when not
+#                                  set.
 
 posts:
   # Survey (keyed by SURVEYS label) — opened by `study-bot survey`.
@@ -35,6 +55,11 @@ posts:
       body: "Short pitch shown in the optional body field of the link post."
       flair: "Marketing (Repost)"
       auto_click_add: true
+      auto_post: true
+      schedule:
+        weekday: thursday
+        hour: 16
+        minute: 5
     - subreddit: takemysurvey
       title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
       post_type: link
@@ -42,6 +67,11 @@ posts:
       body: "Short pitch shown in the optional body field of the link post."
       flair: "Personal"
       auto_click_add: true
+      auto_post: true
+      schedule:
+        weekday: thursday
+        hour: 16
+        minute: 8
 
   # Experiment (keyed by EXPERIMENTS label) — opened by `study-bot experiment`.
   qs_colorslider_v5:
@@ -52,6 +82,7 @@ posts:
       body: "Short pitch shown in the optional body field of the link post."
       flair: "Academic (Repost)"
       auto_click_add: true
+      auto_post: true
     - subreddit: takemysurvey
       title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
       post_type: link
@@ -59,6 +90,7 @@ posts:
       body: "Short pitch shown in the optional body field of the link post."
       flair: "Academic-Personal"
       auto_click_add: true
+      auto_post: true
 
   # Example: a text post.  Uncomment and adapt for self-text recruitment.
   # Some Other Survey:

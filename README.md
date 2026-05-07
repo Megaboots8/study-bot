@@ -79,6 +79,83 @@ The **first run in survey mode** opens a browser window to authorize
 Google Sheets access. After you approve, `token.json` is saved and
 subsequent runs are fully silent.
 
+### Scheduling
+
+Each Reddit post entry in `reddit_posts.yml` may carry its own
+`schedule:` block:
+
+```yaml
+schedule:
+  weekday: thursday      # mon|tue|wed|thu|fri|sat|sun (case-insensitive)
+  hour: 16
+  minute: 5
+  tz: America/New_York   # optional, defaults to America/New_York
+```
+
+When you run `study-bot survey` (or `experiment`), the program builds a
+chronological list of all scheduled posts for that mode and processes
+them one at a time:
+
+1. Wait until the first post's slot.
+2. Run the survey check + send the Telegram update.
+3. Open and submit the first post (if auto-clicking is enabled).
+4. Wait until the next post's slot, open + submit, etc.
+
+The survey/experiment check fires once per run (at the first post's
+slot), so all posts in that run share the same fresh count.
+
+Posts that omit `schedule:` fall back to a global default (Thursday
+15:50 America/New_York — see `_DEFAULT_SCHEDULE_*` in
+`src/study_bot/__main__.py`).  Surveys with no Reddit posts at all
+still run at the global default time.
+
+If today is the target weekday and the time has not yet passed, the
+slot fires today; otherwise next week.  The wait re-checks the
+wall-clock once a minute, so the run still fires close to the right
+time even if your computer briefly sleeps during the wait.
+
+To skip every wait and run all posts back-to-back (useful for
+testing), pass `--now`:
+
+```powershell
+study-bot survey --now
+study-bot experiment --now
+```
+
+The desktop shortcuts run *with* the schedule (no `--now`).  When you
+double-click one, you'll see a line like
+
+```
+Scheduled to run at 2026-05-14 16:05 EDT (waiting 167h 12m)
+```
+
+and the cmd window stays open until each slot fires.  Closing the
+window or rebooting cancels any unfired slots; relaunch the shortcut
+afterwards.
+
+### Auto-posting
+
+When a post entry has both `auto_click_add: true` and `auto_post:
+true`, study-bot does the entire submit flow without you touching the
+mouse:
+
+1. Opens the prefilled submit tab.
+2. The Tampermonkey userscript opens the flair dialog and selects the
+   matching radio.
+3. study-bot OS-clicks the dialog's blue "Add" button to commit the
+   flair.
+4. study-bot OS-clicks the composer's blue "Post" button.
+5. If Reddit shows a "Your post may break these subreddit rules"
+   warning dialog, study-bot clicks the gray "Submit without editing"
+   button (computed at a measured pixel offset to the LEFT of the
+   warning's blue "Edit Post" button).
+
+Each step is gated on the foreground window's title containing
+"reddit" or "r/", so the bot won't click anywhere if you've switched
+to another window.  Each step is also best-effort: a missed step
+leaves the dialog/composer in place for you to finish manually, and
+the rest of the run continues.
+
 ## What each mode does
 
 ### `study-bot survey`

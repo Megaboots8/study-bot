@@ -5,20 +5,32 @@ Uses Reddit's officially-supported URL parameters (`?title=...&url=...`,
 Reddit" button on the web uses.  No browser automation, no profile
 management, no automation fingerprints.
 
-The new tab opens in your already-running default browser (Chrome),
-where you are already logged in.  Review the post and click "Post" by
-hand.
+Auto-flair / auto-post flow
+----------------------------
+When the YAML entry sets `auto_click_add: true` and a `flair` is
+configured, the companion Tampermonkey userscript
+(`userscripts/reddit-auto-flair.user.js`, v0.8+) runs inside the new tab
+and drives the full submission sequence:
 
-If the YAML entry sets `auto_click_add: true` and a `flair` is
-configured, study-bot will additionally take screenshots a few seconds
-after opening the tab and issue an OS-level mouse click on the flair
-dialog's blue "Add" button.  See `reddit_click.py` for why that step
-needs to happen at the OS level rather than from the userscript.
+1. The userscript opens the flair dialog and selects the correct radio.
+2. It locates each target button via DOM (immune to color, zoom, sidebar
+   clutter) and encodes its exact physical-pixel screen position in
+   document.title as `[SBP:<phase>:<x>,<y>]`.
+3. Python (`reddit_click.py`) polls the foreground window title, reads the
+   coordinates, and fires one OS-level pyautogui.click per phase.  OS
+   clicks have isTrusted=true, which Reddit's Lit components require.
+
+If `auto_post: true` is also set, the URL includes `_autopost=true` so the
+userscript continues through the Post and (optional) Submit-without-editing
+phases automatically.
+
+See `reddit_click.py` for the full phase-IPC protocol.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 import urllib.parse
 import webbrowser
 from typing import Literal
@@ -36,39 +48,33 @@ def prefill(
     body: str = "",
     flair: str = "",
     auto_click_add: bool = False,
+    auto_post: bool = False,
 ) -> None:
     """Open a new browser tab to Reddit's submit form, pre-filled.
 
     Parameters
     ----------
     subreddit:
-        The subreddit name without the `r/` prefix (e.g. "SampleSize").
+        Subreddit name without the `r/` prefix (e.g. "SampleSize").
     title:
-        Post title — fills the Title field on either tab.
+        Post title.
     post_type:
         "link" (default) opens the Link tab and pre-fills `link_url`.
-        "text" opens the Text tab and (optionally) pre-fills `body`.
+        "text" opens the Text tab and optionally pre-fills `body`.
     link_url:
         URL placed in the Link URL field when `post_type == "link"`.
-        Ignored for text posts.
     body:
-        Optional self-text body.  Used as the post body for text posts
-        and as the optional body field for link posts.
+        Optional self-text body.
     flair:
-        Optional flair name.  When set, the URL also carries a custom
-        `_autoflair=<name>` query parameter that Reddit ignores but the
-        companion Tampermonkey userscript at
-        `userscripts/reddit-auto-flair.user.js` reads and uses to open
-        the flair dialog and select the matching radio option.
+        Flair name.  When set, the URL carries `_autoflair=<name>` so
+        the userscript can select the matching radio option.
     auto_click_add:
-        When True (and a flair is configured), watch the screen for the
-        dialog's blue "Add" button and issue an OS-level mouse click on
-        it once it appears.  Required because Reddit's Lit-based dialog
-        rejects the synthetic click the userscript would otherwise issue.
-        This blocks for up to ~15 seconds.
-
-    Never raises; failures are logged as warnings so the rest of
-    study-bot keeps running.
+        When True (and flair is set), Python waits for the userscript to
+        signal `[SBP:add:x,y]` and OS-clicks the flair Add button.
+    auto_post:
+        When True (and auto_click_add is True), the URL also carries
+        `_autopost=true` so the userscript continues through the Post and
+        Submit-without-editing phases.  Python OS-clicks each in turn.
     """
     try:
         params: dict[str, str] = {"title": title}
@@ -78,7 +84,6 @@ def prefill(
             if link_url:
                 params["url"] = link_url
             if body:
-                # Reddit's link-post form has an optional body field.
                 params["text"] = body
         else:
             params["type"] = "TEXT"
@@ -88,6 +93,8 @@ def prefill(
 
         if flair:
             params["_autoflair"] = flair
+        if flair and auto_click_add and auto_post:
+            params["_autopost"] = "true"
 
         qs = urllib.parse.urlencode(params)
         url = f"https://www.reddit.com/r/{subreddit}/submit?{qs}"
@@ -100,9 +107,67 @@ def prefill(
         logger.warning("Reddit pre-fill failed: %s", exc)
         return
 
-    if flair and auto_click_add:
-        try:
-            from .reddit_click import click_add_button
-            click_add_button()
-        except Exception as exc:
-            logger.warning("Auto-click Add failed: %s", exc)
+    # Reset Chrome's zoom to 100% (Ctrl+0) so that the CSS-pixel coordinates
+    # the userscript computes via getBoundingClientRect map cleanly to
+    # physical pixels (devicePixelRatio × 1 at 100% browser zoom).
+    # We wait for Chrome to bring the new tab to front before sending the
+    # keystroke.
+    try:
+        import pyautogui as _pag
+        from .reddit_click import _foreground_window_title, _is_reddit_foreground
+        time.sleep(2.0)
+        _ftitle = _foreground_window_title()
+        if _is_reddit_foreground(_ftitle):
+            _pag.FAILSAFE = False
+            _pag.hotkey("ctrl", "0")
+            logger.info("Sent Ctrl+0 to reset Reddit tab zoom to 100%%")
+        else:
+            logger.debug(
+                "Foreground window is %r; skipping zoom reset",
+                _ftitle,
+            )
+    except Exception as exc:
+        logger.debug("Zoom reset skipped: %s", exc)
+
+    if not (flair and auto_click_add):
+        return
+
+    try:
+        from .reddit_click import (
+            click_add_button,
+            click_post_button,
+            click_submit_without_editing,
+        )
+    except Exception as exc:
+        logger.warning("Could not import reddit_click helpers: %s", exc)
+        return
+
+    # --- Phase 1: flair Add ---
+    try:
+        added = click_add_button()
+    except Exception as exc:
+        logger.warning("Auto-click Add failed: %s", exc)
+        return
+
+    if not (added and auto_post):
+        return
+
+    # Give the flair dialog a moment to fully disappear before the
+    # userscript emits [SBP:post].
+    time.sleep(0.5)
+
+    # --- Phase 2: Post ---
+    try:
+        posted = click_post_button()
+    except Exception as exc:
+        logger.warning("Auto-click Post failed: %s", exc)
+        return
+
+    if not posted:
+        return
+
+    # --- Phase 3: Submit without editing (optional — warning dialog) ---
+    try:
+        click_submit_without_editing()
+    except Exception as exc:
+        logger.warning("Auto-click Submit-without-editing failed: %s", exc)

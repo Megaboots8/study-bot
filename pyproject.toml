@@ -21,6 +21,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "Pillow>=10.0",
     "numpy>=1.24",
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]

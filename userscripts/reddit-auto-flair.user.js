@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         study-bot Reddit auto-flair
+// @name         study-bot Reddit auto-flair + auto-post (title-IPC)
 // @namespace    https://github.com/Megaboots8/study-bot
-// @version      0.7.0
-// @description  When study-bot opens a Reddit submit page with a `_autoflair=<name>` query param, this userscript opens the flair dialog and selects the matching radio option.  It deliberately does NOT click the dialog's "Add" button — Reddit's Lit-based form components ignore synthetic clicks for that final commit, so study-bot's Python side issues a real OS-level mouse click after this runs.
+// @version      0.8.3
+// @description  When study-bot opens a Reddit submit page, this userscript guides the full submission flow: selects the flair, then advertises each button's exact screen coordinates via document.title so Python can OS-click them with isTrusted=true.  The title format is [SBP:<phase>:<x>,<y>]; Python polls the window title and fires one OS-level click per phase.  v0.8.3: re-published as 0.8.3 to make it obvious in Tampermonkey when the v0.8.2 dialog-detection fix is live (no functional change vs 0.8.2).
 // @include      *://*.reddit.com/r/*/submit*
 // @include      *://www.reddit.com/r/*/submit*
 // @include      *://sh.reddit.com/r/*/submit*
@@ -12,31 +12,56 @@
 // @grant        none
 // ==/UserScript==
 
+/*
+ * Title-IPC protocol
+ * ------------------
+ * Phases emitted by this script (via document.title):
+ *
+ *   [SBP:add:<x>,<y>]     Flair dialog Add button is ready at physical pixel (x,y)
+ *   [SBP:post:<x>,<y>]    Composer Post button is ready
+ *   [SBP:submit:<x>,<y>]  Warning-dialog "Submit without editing" is ready
+ *   [SBP:done]            Submission complete or no further action needed
+ *   [SBP:none]            An expected button was not found (Python treats as timeout)
+ *
+ * A 250 ms setInterval keeps the current marker in the title so Reddit's
+ * own SPA title updates cannot strip it.
+ *
+ * Gating
+ * ------
+ *   _autoflair=<name>  URL param — flair to apply (same as before v0.8)
+ *   _autopost=true     URL param — if present, script continues through
+ *                      Post and Submit-without-editing phases after flair.
+ *                      If absent, script stops after advertising [SBP:add].
+ */
+
 (async () => {
     'use strict';
 
-    const log = (...args) => console.log('[study-bot auto-flair]', ...args);
-    const warn = (...args) => console.warn('[study-bot auto-flair]', ...args);
+    const log  = (...a) => console.log('[study-bot]', ...a);
+    const warn = (...a) => console.warn('[study-bot]', ...a);
 
-    log('userscript loaded; href =', location.href);
+    log('v0.8 loaded; href =', location.href);
 
     if (!/\/submit/.test(location.pathname)) {
         log('not a submit page; doing nothing');
         return;
     }
 
-    const flairName = new URLSearchParams(location.search).get('_autoflair');
+    const params    = new URLSearchParams(location.search);
+    const flairName = params.get('_autoflair');
+    const autoPost  = params.get('_autopost') === 'true';
+
     if (!flairName) {
         log('no _autoflair query param; doing nothing');
         return;
     }
-    log('will try to apply flair:', flairName);
+    log('flair =', flairName, '| autoPost =', autoPost);
 
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // ── Helpers ─────────────────────────────────────────────────────────────
 
-    // Walk the document tree including any open shadow roots, yielding every
-    // element matching the selector.  Reddit's `shreddit` components use
-    // shadow DOM heavily, so a plain document.querySelectorAll is not enough.
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    /** Walk document tree including all open shadow roots. */
     function* deepQueryAll(selector, root = document) {
         if (root.querySelectorAll) {
             for (const el of root.querySelectorAll(selector)) yield el;
@@ -47,167 +72,351 @@
         }
     }
 
-    function visibleTextOf(el) {
-        // Prefer aria-label and direct innerText so we don't accidentally
-        // pick up text from deeply nested children of unrelated buttons.
+    function visibleText(el) {
         const al = el.getAttribute && el.getAttribute('aria-label');
         if (al) return al.trim();
-        const it = el.innerText || el.textContent || '';
-        return it.trim();
+        return (el.innerText || el.textContent || '').trim();
     }
 
     function debugSnippet(el) {
         if (!el) return '<null>';
-        const html = (el.outerHTML || '').replace(/\s+/g, ' ').slice(0, 220);
-        return `<${el.tagName.toLowerCase()}${el.id ? ' #' + el.id : ''} aria-label="${el.getAttribute('aria-label') || ''}"> ${html}`;
+        return `<${el.tagName.toLowerCase()} aria-label="${el.getAttribute && el.getAttribute('aria-label') || ''}"> ${(el.outerHTML || '').slice(0, 120)}`;
     }
 
-    // Strict matcher: only true buttons / role=button / links / labels.
-    // Excludes <span>, which was the source of false matches in v0.2.
     const CLICKABLE = 'button, [role="button"], a[role="button"], label[for], faceplate-radio-input';
 
-    function findExactMatch(text) {
-        const wanted = text.toLowerCase();
-        for (const el of deepQueryAll(CLICKABLE)) {
-            if (visibleTextOf(el).toLowerCase() === wanted) return el;
-        }
+    function findExactIn(root, text) {
+        const w = text.toLowerCase();
+        const nodes = root.querySelectorAll ? root.querySelectorAll(CLICKABLE) : [];
+        for (const el of nodes) if (visibleText(el).toLowerCase() === w) return el;
         return null;
     }
 
-    function findContainsMatch(text) {
-        const wanted = text.toLowerCase();
-        for (const el of deepQueryAll(CLICKABLE)) {
-            if (visibleTextOf(el).toLowerCase().includes(wanted)) return el;
-        }
-        return null;
-    }
-
-    // Dispatch a real PointerEvent + MouseEvent + click sequence so the
-    // target's handlers see the full chain a genuine pointer interaction
-    // would produce.  Reddit's Lit-based faceplate components (the flair
-    // opener, faceplate-radio-input, etc.) listen on this chain rather
-    // than the bare click handler.
-    //
-    // We deliberately do NOT also call el.click() afterwards — for the
-    // flair opener button, a synthetic click + a follow-up el.click()
-    // both trigger onOpenDialog → showModal, which throws "The element
-    // already has an 'open' attribute" on the second call.  The
-    // synthetic events are sufficient on their own.
+    /** Dispatch a full isTrusted-like pointer+mouse+click chain. */
     function realClick(el) {
         if (!el) return;
-        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        const init = {
-            bubbles: true, cancelable: true, composed: true, view: window,
-            button: 0, buttons: 1, clientX: cx, clientY: cy,
-            pointerType: 'mouse', isPrimary: true,
-        };
-        try { el.dispatchEvent(new PointerEvent('pointerdown', init)); } catch (e) {}
-        try { el.dispatchEvent(new MouseEvent('mousedown', init)); } catch (e) {}
-        try { el.dispatchEvent(new PointerEvent('pointerup', init)); } catch (e) {}
-        try { el.dispatchEvent(new MouseEvent('mouseup', init)); } catch (e) {}
-        try { el.dispatchEvent(new MouseEvent('click', init)); } catch (e) {}
+        const r  = el.getBoundingClientRect ? el.getBoundingClientRect() : { left:0, top:0, width:0, height:0 };
+        const cx = r.left + r.width  / 2;
+        const cy = r.top  + r.height / 2;
+        const init = { bubbles:true, cancelable:true, composed:true, view:window,
+                       button:0, buttons:1, clientX:cx, clientY:cy,
+                       pointerType:'mouse', isPrimary:true };
+        for (const [t,Ev] of [['pointerdown',PointerEvent],['mousedown',MouseEvent],
+                               ['pointerup',PointerEvent],['mouseup',MouseEvent],
+                               ['click',MouseEvent]]) {
+            try { el.dispatchEvent(new Ev(t, init)); } catch {}
+        }
     }
 
-    async function waitFor(predicate, { timeout = 10000, interval = 200 } = {}) {
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
-            try {
-                const result = predicate();
-                if (result) return result;
-            } catch (e) { /* swallow */ }
+    async function waitFor(pred, { timeout = 12000, interval = 200 } = {}) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeout) {
+            try { const r = pred(); if (r) return r; } catch {}
             await sleep(interval);
         }
         return null;
     }
 
-    // ---- Step 1: find and click the "Add flair and tags" button on the submit page ----
-    // The shreddit composer renders this with a stable id we can target
-    // exactly: <button id="reddit-post-flair-button">.  Fall back to text
-    // matching if the id is ever renamed.
+    // ── Title-IPC state ──────────────────────────────────────────────────────
+
+    let _currentMarker = '';        // e.g. '[SBP:add:1200,700]'
+    let _origTitle     = '';        // captured once before we start mutating
+
+    /**
+     * Compute the absolute physical-pixel screen position of the centre of `el`.
+     *
+     * Converts CSS pixels -> physical pixels via devicePixelRatio and adds the
+     * window's screen offset plus the browser chrome height (title bar + toolbar).
+     * On a 100% DPR / 100% Windows scaling setup DPR is 1 and this is a
+     * straight viewport-to-screen mapping.
+     */
+    function buttonScreenPos(el) {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        // Force layout so getBoundingClientRect reflects the post-scroll position.
+        // eslint-disable-next-line no-unused-expressions
+        el.offsetHeight;
+        const rect    = el.getBoundingClientRect();
+        const dpr     = window.devicePixelRatio || 1;
+        const chromeH = window.outerHeight - window.innerHeight;
+        const cssX    = rect.left + rect.width  / 2;
+        const cssY    = rect.top  + rect.height / 2;
+        return {
+            x: Math.round((window.screenX + cssX)          * dpr),
+            y: Math.round((window.screenY + chromeH + cssY) * dpr),
+        };
+    }
+
+    function setMarker(phase, pos) {
+        if (phase === 'done' || phase === 'none') {
+            _currentMarker = `[SBP:${phase}]`;
+        } else {
+            _currentMarker = `[SBP:${phase}:${pos.x},${pos.y}]`;
+        }
+        applyMarker();
+        log('title marker set:', _currentMarker);
+    }
+
+    function applyMarker() {
+        if (!_currentMarker) return;
+        // Strip any existing marker then prepend the current one.
+        const bare = (document.title || '').replace(/\[SBP:[^\]]*\]\s*/g, '').trim();
+        document.title = `${_currentMarker} ${bare}`;
+    }
+
+    // Keep the marker alive even when Reddit's SPA rewrites document.title.
+    setInterval(applyMarker, 250);
+
+    // Capture the page title before we add our markers, for log clarity.
+    _origTitle = (document.title || '').replace(/\[SBP:[^\]]*\]\s*/g, '').trim();
+
+    // ── Step 1: open the flair dialog ────────────────────────────────────────
+
     const addFlairBtn = await waitFor(() => {
         for (const el of deepQueryAll('#reddit-post-flair-button')) return el;
-        // Fallbacks (in priority order)
         for (const el of deepQueryAll(CLICKABLE)) {
             const al = (el.getAttribute('aria-label') || '').toLowerCase();
             if (al === 'add flair' || al === 'flair' || al.includes('flair and tags')) return el;
         }
-        return findExactMatch('Add flair and tags') ||
-               findExactMatch('Add flair') ||
-               findContainsMatch('Add flair');
+        return null;
     });
 
     if (!addFlairBtn) {
-        warn('could not find an "Add flair and tags" button on this page');
+        warn('no "Add flair and tags" button found');
+        setMarker('none');
         return;
     }
     log('clicking flair opener:', debugSnippet(addFlairBtn));
     realClick(addFlairBtn);
 
-    // ---- Step 2: confirm a dialog/popover actually opened ----
+    // ── Step 2: wait for dialog, select the radio ────────────────────────────
+
     const dialog = await waitFor(() => {
         for (const el of deepQueryAll('[role="dialog"], [role="menu"], [role="listbox"], faceplate-dialog, faceplate-menu')) {
-            const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-            if (rect && rect.width > 0 && rect.height > 0) return el;
+            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (r && r.width > 0 && r.height > 0) return el;
         }
         return null;
-    }, { timeout: 5000 });
+    }, { timeout: 8000 });
 
     if (!dialog) {
-        warn('clicked the flair opener but no dialog/menu appeared; aborting');
+        warn('flair dialog did not open');
+        setMarker('none');
         return;
     }
     log('flair dialog opened:', debugSnippet(dialog));
 
-    // ---- Step 3: inside the dialog, find and click the matching option ----
     function findOptionInDialog(text) {
-        const wanted = text.toLowerCase();
-        // Search dialog descendants only.
+        const w = text.toLowerCase();
         const candidates = dialog.querySelectorAll(
             'button, [role="option"], [role="menuitem"], [role="radio"], faceplate-radio-input, label'
         );
-        let containsMatch = null;
+        let partial = null;
         for (const el of candidates) {
-            const t = visibleTextOf(el).toLowerCase();
+            const t = visibleText(el).toLowerCase();
             if (!t) continue;
-            if (t === wanted) return el;
-            if (!containsMatch && t.includes(wanted)) containsMatch = el;
+            if (t === w) return el;
+            if (!partial && t.includes(w)) partial = el;
         }
-        return containsMatch;
+        return partial;
     }
 
     const option = await waitFor(() => findOptionInDialog(flairName));
     if (!option) {
-        warn('flair dialog opened but no option matched:', flairName);
-        // Dump candidates so we can refine the matcher.
-        const candidates = dialog.querySelectorAll(
+        warn('no flair option matched:', flairName);
+        log('available options:', Array.from(dialog.querySelectorAll(
             'button, [role="option"], [role="menuitem"], [role="radio"], faceplate-radio-input, label'
-        );
-        log('candidate option texts in dialog:',
-            Array.from(candidates).map(c => visibleTextOf(c)).filter(Boolean));
+        )).map(visibleText).filter(Boolean));
+        setMarker('none');
         return;
     }
-    log('selecting flair option:', debugSnippet(option));
+    log('selecting radio:', debugSnippet(option));
     realClick(option);
-    // Lit form-associated custom elements (like faceplate-radio-input) often
-    // ignore a synthetic click for purposes of form-state tracking unless we
-    // also fire a change event.  We dispatch them so the radio at least
-    // looks selected; the actual commit happens when study-bot's Python
-    // side issues an OS-level click on the dialog's "Add" button.
-    try {
-        option.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        option.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    } catch (e) {}
+    try { option.dispatchEvent(new Event('change', { bubbles:true, composed:true })); } catch {}
+    try { option.dispatchEvent(new Event('input',  { bubbles:true, composed:true })); } catch {}
 
-    // We deliberately do NOT click the dialog's "Add" / "Apply" / "Confirm"
-    // button here.  Reddit's flair dialog rejects synthetic clicks for that
-    // final commit (the radio's internal form state never updates from a
-    // JS-fired event), so even a perfectly-targeted realClick() leaves the
-    // dialog open and the flair unset.  Instead, study-bot's Python side
-    // takes a screenshot, finds the bright-blue Add button shape in the
-    // lower half of the screen, and clicks it via pyautogui — which fires
-    // a real OS mouse event with isTrusted=true that Reddit accepts.
-    log('radio option selected; leaving dialog open for OS-level Add click from study-bot');
-    log('flair flow finished');
+    // ── Step 3: locate Add button in dialog; advertise [SBP:add] ─────────────
+
+    // The dialog's commit button is typically the LAST button (or the one
+    // labelled "Add" / "Apply" / "Save").  We look for it by text first,
+    // then fall back to the last <button> inside the dialog.
+    function findAddInDialog() {
+        // Prefer exact text matches: "Add", "Apply", "Save".
+        for (const label of ['add', 'apply', 'save', 'done']) {
+            const el = findExactIn(dialog, label);
+            if (el) return el;
+        }
+        // Fallback: last <button> inside the dialog (likely the primary action).
+        const btns = Array.from(dialog.querySelectorAll('button'));
+        return btns.length ? btns[btns.length - 1] : null;
+    }
+
+    const addBtn = await waitFor(findAddInDialog, { timeout: 5000 });
+    if (!addBtn) {
+        warn('could not locate Add button inside dialog; Python will have to click manually');
+        setMarker('none');
+        return;
+    }
+    log('found Add button:', debugSnippet(addBtn));
+    await sleep(200);  // let the radio selection animation settle
+    const addPos = buttonScreenPos(addBtn);
+    log('Add button screen pos:', addPos);
+    setMarker('add', addPos);
+
+    if (!autoPost) {
+        log('_autopost not set; done after advertising Add');
+        return;
+    }
+
+    // ── Step 4: wait for flair dialog to close; advertise [SBP:post] ─────────
+
+    // BUG-FIX (v0.8.1): do NOT track the original `dialog` reference.
+    // After realClick(option) + dispatchEvent('change'), Reddit's Lit
+    // framework re-renders the dialog into a DIFFERENT DOM node.  The old
+    // reference becomes detached (document.contains returns false) even
+    // though the flair dialog is still visually open, causing a false
+    // "dialog gone" signal and skipping Python's Add click entirely.
+    //
+    // Instead, we re-query for visible flair radio inputs on every tick.
+    // These only exist while the dialog is genuinely open; they disappear
+    // when a real OS-level click on Add commits the form and Reddit closes
+    // the dialog for real.
+    const dialogGone = await waitFor(() => {
+        // Primary check: any visible flair radio input means dialog is open.
+        for (const r of deepQueryAll(
+            '[id^="post-flair-radio-input"], faceplate-radio-input[name="flairId"]'
+        )) {
+            const rect = r.getBoundingClientRect ? r.getBoundingClientRect() : null;
+            if (rect && rect.width > 0 && rect.height > 0) return null;  // still open
+        }
+        // Defensive fallback: if Reddit renames radio IDs, treat any visible
+        // faceplate-dialog that still contains buttons as "still open".
+        for (const d of deepQueryAll('faceplate-dialog, [role="dialog"]')) {
+            const rect = d.getBoundingClientRect ? d.getBoundingClientRect() : null;
+            if (rect && rect.width > 50 && rect.height > 50
+                    && d.querySelector && d.querySelector('button')) {
+                return null;  // still open
+            }
+        }
+        return true;  // no visible flair radios or flair-dialog found → closed
+    }, { timeout: 30000, interval: 300 });
+
+    if (!dialogGone) {
+        warn('flair dialog did not close within 20s; Python may not have clicked Add');
+        setMarker('none');
+        return;
+    }
+    log('flair dialog closed; looking for Post button');
+
+    // Find the composer's Post button.  Reddit's shreddit composer uses a
+    // custom element <shreddit-composer> with a shadow root containing the
+    // action row.  We try specific selectors first, then fall back to
+    // a text match for "Post" among all visible buttons.
+    async function findPostButton() {
+        // Strategy A: shreddit-specific submit button
+        for (const el of deepQueryAll('shreddit-composer-submit-button, shreddit-submit-button, [slot="submit-button"] button')) {
+            if (visibleText(el).toLowerCase() === 'post') return el;
+        }
+        // Strategy B: any button labelled "Post" that is visible on screen
+        for (const el of deepQueryAll('button')) {
+            if (visibleText(el).toLowerCase() === 'post') {
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) return el;
+            }
+        }
+        // Strategy C: look for the action row container and pick "Post" from it
+        for (const el of deepQueryAll('[data-testid="post-submit-button"], [data-post-submit], [aria-label="Post"]')) {
+            return el;
+        }
+        return null;
+    }
+
+    const postBtn = await waitFor(findPostButton, { timeout: 10000 });
+    if (!postBtn) {
+        warn('Post button not found in composer');
+        setMarker('none');
+        return;
+    }
+    log('found Post button:', debugSnippet(postBtn));
+    const postPos = buttonScreenPos(postBtn);
+    log('Post button screen pos:', postPos);
+    setMarker('post', postPos);
+
+    // ── Step 5: after Python clicks Post, watch for warning dialog or nav ────
+
+    // Bug fixed in v0.8.2: rather than looking for a dialog element with
+    // text "may break" / "rules" (Reddit's rule-warning dialog is rendered
+    // with neither role="dialog" nor faceplate-dialog and has content that
+    // deepQueryAll can't penetrate), we look DIRECTLY for the button we
+    // would click — "Submit without editing".  If a visible button with
+    // that label exists, the warning dialog is up.  This single detection
+    // doubles as the click target.
+    const initialHref = location.href;
+
+    function findSubmitWithoutEditingButton() {
+        const labels = ['submit without editing', 'submit anyway', 'post anyway'];
+        // Strategy A: visible-text match on any button-like element.
+        for (const el of deepQueryAll('button, [role="button"], a[role="button"]')) {
+            const t = visibleText(el).toLowerCase();
+            if (!t) continue;
+            for (const label of labels) {
+                if (t === label || t.includes(label)) {
+                    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+                    if (r && r.width > 0 && r.height > 0) return el;
+                }
+            }
+        }
+        // Strategy B: aria-label match across all elements (covers buttons
+        // whose visible text is rendered via slot/shadow content).
+        for (const el of deepQueryAll('[aria-label]')) {
+            const al = (el.getAttribute('aria-label') || '').toLowerCase();
+            for (const label of labels) {
+                if (al === label || al.includes(label)) {
+                    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+                    if (r && r.width > 0 && r.height > 0) return el;
+                }
+            }
+        }
+        return null;
+    }
+
+    const postResult = await waitFor(() => {
+        // Navigation away from /submit/ means the post went through directly.
+        if (location.href !== initialHref && !/\/submit/.test(location.pathname)) {
+            return 'navigated';
+        }
+        // Otherwise, look for the warning dialog's signature button.
+        const btn = findSubmitWithoutEditingButton();
+        if (btn) return btn;
+        return null;
+    }, { timeout: 30000, interval: 300 });
+
+    if (!postResult) {
+        warn('no navigation or "Submit without editing" button after Post click within 30s');
+        setMarker('done');  // best effort; user can handle manually
+        return;
+    }
+
+    if (postResult === 'navigated') {
+        log('post submitted without warning dialog; done');
+        setMarker('done');
+        return;
+    }
+
+    // postResult IS the "Submit without editing" button.
+    log('warning dialog detected; Submit-without-editing:', debugSnippet(postResult));
+    const submitPos = buttonScreenPos(postResult);
+    log('Submit-without-editing screen pos:', submitPos);
+    setMarker('submit', submitPos);
+
+    // Wait for warning dialog to close (Python clicked Submit-without-editing).
+    // Detected by: button no longer visible OR navigation occurred.  Re-query
+    // each tick so a Lit re-render (cf. v0.8.1 bug) doesn't fool us.
+    await waitFor(() => {
+        if (location.href !== initialHref && !/\/submit/.test(location.pathname)) return true;
+        if (!findSubmitWithoutEditingButton()) return true;
+        return null;
+    }, { timeout: 15000, interval: 300 });
+
+    log('submission complete');
+    setMarker('done');
 })();
