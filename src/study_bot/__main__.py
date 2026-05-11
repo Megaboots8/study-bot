@@ -1,29 +1,74 @@
+"""study-bot: integrated scheduler + poster.
+
+Single long-running process that:
+
+1. Builds a chronological queue of every Reddit post in ``reddit_posts.yml``
+   for the current week, applying a uniform random ±jitter_seconds offset
+   to each fire time so the actual post moment is unpredictable.
+2. Waits until each slot, runs the appropriate count check (Google Sheets
+   for SURVEYS, MySQL via SSH tunnel for EXPERIMENTS), opens the Reddit
+   submit tab, then sends ONE combined Telegram message per slot that
+   includes both the count result and whether the post went up.
+3. After processing all slots in the current week, the loop rebuilds the
+   queue (slots automatically roll forward to the next week) and keeps
+   running.
+
+Telegram is the alarm channel:
+  - Startup heartbeat (queue length, first slot).
+  - Per-slot combined message: count + post result (e.g. "Posted: r/X OK").
+  - "[study-bot ERROR] ..." on API/DB/posting failure.
+  - "[study-bot CRASH] ..." on unhandled exception.
+  - Stop confirmation when "stop" is received over Telegram.
+
+CLI
+---
+    study-bot run                       (production loop, runs forever)
+    study-bot run --now                 (fire all queued slots immediately, exit)
+    study-bot run --dry-run             (open tabs but never auto-click Add/Post/Submit;
+                                          useful for verifying prefill content without spamming)
+    study-bot run --only survey         (filter queue to surveys only)
+    study-bot run --only experiment     (filter queue to experiments only)
+
+Flags combine: e.g. ``study-bot run --now --dry-run --only survey``.
+
+Remote stop
+-----------
+Send "stop" (case-insensitive, any surrounding whitespace) to the bot's
+Telegram chat and the process exits cleanly after the current slot
+completes.  Task Scheduler's restart-on-failure rule does NOT fire on a
+clean exit (code 0), so the bot stays stopped until you restart it
+manually or reboot.
+"""
+
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .config import EXPERIMENTS, REDDIT_POSTS, SURVEYS
+from .config import EXPERIMENTS, REDDIT_POSTS, REDDIT_SETTINGS, SURVEYS
 from .database import get_experiment_counts
 from .logger import get_logger
-from .notify import send_telegram
-from .reddit_post import prefill as reddit_prefill
-from .scheduler import THURSDAY, next_occurrence, wait_until
+from .notify import send_telegram, start_stop_listener
+from .reddit_post import PostResult, prefill as reddit_prefill
+from .scheduler import apply_jitter, next_occurrence, wait_until
 from .sheets import get_response_count
 
 _STATE_FILE = Path(__file__).resolve().parents[2] / "logs" / "last_counts.json"
 
-# Default schedule: a post entry without an explicit `schedule:` block
-# falls back to this slot.  Eventually every post should carry its own
-# schedule and this default will only matter for surveys that have no
-# Reddit posts configured (so the check still runs at a known time).
-_DEFAULT_SCHEDULE_WEEKDAY = THURSDAY
-_DEFAULT_SCHEDULE_HOUR = 15
-_DEFAULT_SCHEDULE_MINUTE = 50
-_DEFAULT_SCHEDULE_TZ = "America/New_York"
+# Default schedule for posts (or surveys/experiments without a Reddit post)
+# that omit a `schedule:` block entirely.
+_DEFAULT_SCHEDULE = {
+    "weekday": 3,   # Thursday
+    "hour": 15,
+    "minute": 50,
+    "tz": "America/New_York",
+}
 
 _WEEKDAY_NAMES = {
     "monday": 0, "mon": 0,
@@ -34,6 +79,11 @@ _WEEKDAY_NAMES = {
     "saturday": 5, "sat": 5,
     "sunday": 6, "sun": 6,
 }
+
+
+# ---------------------------------------------------------------------------
+# State (last counts)
+# ---------------------------------------------------------------------------
 
 
 def _load_last_counts() -> dict:
@@ -61,13 +111,12 @@ def _delta_suffix(count: int, last_count: int | None) -> str:
     return " (no change)"
 
 
-def _build_message(label: str, count: int, last_count: int | None) -> str:
+def _build_count_line(label: str, count: int, last_count: int | None) -> str:
     return f"{label} # of responses = {count}{_delta_suffix(count, last_count)}"
 
 
-def _build_experiment_message(
+def _build_experiment_count_lines(
     label: str,
-    table: str,
     total: int,
     complete: int,
     last_total: int | None,
@@ -76,6 +125,11 @@ def _build_experiment_message(
     total_line = f"{label} total rows = {total}{_delta_suffix(total, last_total)}"
     complete_line = f"Completed = {complete}{_delta_suffix(complete, last_complete)}"
     return f"{total_line}\n{complete_line}"
+
+
+# ---------------------------------------------------------------------------
+# Schedule expansion
+# ---------------------------------------------------------------------------
 
 
 def _parse_weekday(name) -> int:
@@ -88,213 +142,300 @@ def _parse_weekday(name) -> int:
     raise ValueError(f"Unrecognised weekday: {name!r}")
 
 
-def _post_target_dt(post: dict) -> datetime:
-    """Return the next scheduled run time for a single post entry.
+def _slot_to_dt(slot: dict) -> datetime:
+    weekday = _parse_weekday(slot.get("weekday"))
+    hour = int(slot.get("hour"))
+    minute = int(slot.get("minute"))
+    tz = slot.get("tz", _DEFAULT_SCHEDULE["tz"])
+    return next_occurrence(weekday, hour, minute, tz)
 
-    Reads `post["schedule"]` if present:
 
-        schedule:
-          weekday: thursday
-          hour: 16
-          minute: 5
-          tz: America/New_York   # optional
-
-    Falls back to the global default schedule when no `schedule` block
-    is present.
-    """
+def _post_target_dts(post: dict) -> list[datetime]:
     sched = post.get("schedule") if isinstance(post, dict) else None
-    if sched:
-        weekday = _parse_weekday(sched.get("weekday"))
-        hour = int(sched.get("hour"))
-        minute = int(sched.get("minute"))
-        tz = sched.get("tz", _DEFAULT_SCHEDULE_TZ)
-        return next_occurrence(weekday, hour, minute, tz)
-    return next_occurrence(
-        _DEFAULT_SCHEDULE_WEEKDAY,
-        _DEFAULT_SCHEDULE_HOUR,
-        _DEFAULT_SCHEDULE_MINUTE,
-        _DEFAULT_SCHEDULE_TZ,
-    )
+    if sched is None:
+        return [_slot_to_dt(_DEFAULT_SCHEDULE)]
+    if isinstance(sched, dict):
+        return [_slot_to_dt(sched)]
+    if isinstance(sched, list):
+        return [_slot_to_dt(s) for s in sched if isinstance(s, dict)]
+    raise ValueError(f"Unrecognised schedule shape: {sched!r}")
 
 
-def _wait_for_post(target: datetime, log, args) -> bool:
-    """Wait until `target` unless --now was passed.  Returns False if cancelled."""
-    if args.now:
-        return True
-    try:
-        wait_until(target, log)
-        return True
-    except KeyboardInterrupt:
-        log.info("Schedule wait cancelled by user; skipping remaining posts")
-        return False
+def _expand_post_schedules(label: str):
+    cfg = REDDIT_POSTS.get(label)
+    posts = cfg if isinstance(cfg, list) else ([cfg] if cfg else [])
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        for target in _post_target_dts(post):
+            yield post, target
 
 
-def _open_one_post(label: str, post: dict, log) -> None:
-    try:
-        reddit_prefill(
-            subreddit=post["subreddit"],
-            title=post["title"],
-            post_type=post.get("post_type", "link"),
-            link_url=post.get("link_url", ""),
-            body=post.get("body", ""),
-            flair=post.get("flair", ""),
-            auto_click_add=bool(post.get("auto_click_add", False)),
-            auto_post=bool(post.get("auto_post", False)),
-        )
-    except Exception:
-        log.warning(
-            "Reddit pre-fill skipped for '%s' -> r/%s\n%s",
-            label, post.get("subreddit", "?"), traceback.format_exc(),
-        )
+def _build_unified_queue(jitter_seconds: int) -> list[tuple]:
+    """Build a chronological queue of (kind, source, post, target_jittered)."""
+    items = []
+
+    for survey in SURVEYS:
+        any_posts = False
+        for post, target in _expand_post_schedules(survey["label"]):
+            items.append(("survey", survey, post, apply_jitter(target, jitter_seconds)))
+            any_posts = True
+        if not any_posts:
+            target = _slot_to_dt(_DEFAULT_SCHEDULE)
+            items.append(("survey", survey, None, apply_jitter(target, jitter_seconds)))
+
+    for experiment in EXPERIMENTS:
+        any_posts = False
+        for post, target in _expand_post_schedules(experiment["label"]):
+            items.append(("experiment", experiment, post, apply_jitter(target, jitter_seconds)))
+            any_posts = True
+        if not any_posts:
+            target = _slot_to_dt(_DEFAULT_SCHEDULE)
+            items.append(("experiment", experiment, None, apply_jitter(target, jitter_seconds)))
+
+    items.sort(key=lambda t: t[3])
+    return items
 
 
-def _check_one_survey(survey: dict, last_counts: dict, updated_counts: dict, log) -> None:
+# ---------------------------------------------------------------------------
+# Per-slot actions (fetch only — no Telegram here)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_survey(
+    survey: dict,
+    last_counts: dict,
+    updated_counts: dict,
+    log,
+) -> tuple[bool, str]:
+    """Fetch survey count.  Returns (success, count_line_text)."""
     label = survey["label"]
-    sheet_id = survey["sheet_id"]
-    range_a1 = survey["range"]
     try:
-        count = get_response_count(sheet_id, range_a1)
-        message = _build_message(label, count, last_counts.get(label))
+        count = get_response_count(survey["sheet_id"], survey["range"])
+        line = _build_count_line(label, count, last_counts.get(label))
         updated_counts[label] = count
-        log.info(message)
-        try:
-            send_telegram(message)
-        except Exception:
-            log.error(
-                "Failed to send Telegram success notification\n%s",
-                traceback.format_exc(),
-            )
+        log.info(line)
+        return True, line
     except Exception as exc:
-        log.error("Error processing survey '%s'\n%s", label, traceback.format_exc())
-        try:
-            send_telegram(f"[study-bot ERROR] {label}: {exc}")
-        except Exception:
-            log.error(
-                "Failed to send Telegram error notification\n%s",
-                traceback.format_exc(),
-            )
+        log.error("Error fetching survey %r\n%s", label, traceback.format_exc())
+        return False, str(exc)
 
 
-def _check_one_experiment(experiment: dict, last_counts: dict, updated_counts: dict, log) -> None:
+def _fetch_experiment(
+    experiment: dict,
+    last_counts: dict,
+    updated_counts: dict,
+    log,
+) -> tuple[bool, str]:
+    """Fetch experiment counts.  Returns (success, count_lines_text)."""
     label = experiment["label"]
-    database = experiment["database"]
     table = experiment["table"]
     total_key = f"{label} total"
     complete_key = f"{label} complete"
     try:
-        counts = get_experiment_counts(database, table)
+        counts = get_experiment_counts(experiment["database"], table)
         total = counts["total"]
         complete = counts["complete"]
-        message = _build_experiment_message(
-            label, table, total, complete,
+        lines = _build_experiment_count_lines(
+            label, total, complete,
             last_counts.get(total_key),
             last_counts.get(complete_key),
         )
         updated_counts[total_key] = total
         updated_counts[complete_key] = complete
         log.info("%s (%s): total=%d complete=%d", label, table, total, complete)
-        try:
-            send_telegram(message)
-        except Exception:
-            log.error(
-                "Failed to send Telegram notification for '%s'\n%s",
-                label, traceback.format_exc(),
-            )
+        return True, lines
     except Exception as exc:
-        log.error(
-            "Error processing experiment '%s'\n%s",
-            label, traceback.format_exc(),
+        log.error("Error fetching experiment %r\n%s", label, traceback.format_exc())
+        return False, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Loop
+# ---------------------------------------------------------------------------
+
+
+def _format_target(dt: datetime) -> str:
+    return dt.strftime("%a %Y-%m-%d %H:%M %Z")
+
+
+def _telegram_safe(message: str, log) -> None:
+    try:
+        send_telegram(message)
+    except Exception:
+        log.error("Failed to send Telegram message:\n%s", traceback.format_exc())
+
+
+def _process_queue(
+    queue: list[tuple],
+    args: argparse.Namespace,
+    last_counts: dict,
+    updated_counts: dict,
+    log,
+    stop_event: threading.Event,
+) -> None:
+    n = len(queue)
+    if n == 0:
+        log.info("Empty queue (no surveys/experiments to process).")
+        return
+
+    log.info(
+        "Queue: %d slots, first=%s, last=%s",
+        n, _format_target(queue[0][3]), _format_target(queue[-1][3]),
+    )
+
+    for i, (kind, source, post, target) in enumerate(queue, 1):
+        if stop_event.is_set():
+            log.info("Stop requested; aborting queue at slot %d/%d", i, n)
+            return
+
+        log.info(
+            "[%d/%d] %s '%s' -> r/%s scheduled for %s%s",
+            i, n, kind, source["label"],
+            (post["subreddit"] if post else "<no post>"),
+            _format_target(target),
+            " [DRY-RUN]" if args.dry_run else "",
         )
-        try:
-            send_telegram(f"[study-bot ERROR] {label}: {exc}")
-        except Exception:
-            log.error(
-                "Failed to send Telegram error notification\n%s",
-                traceback.format_exc(),
-            )
 
+        if not args.now:
+            reached = wait_until(target, log, stop_event=stop_event)
+            if not reached:
+                log.info("Stop requested during wait; exiting queue")
+                return
 
-def _build_post_items(items_source: list, label_key: str) -> list:
-    """Build a chronological list of (target_dt, source, post) tuples.
-
-    `items_source` is either SURVEYS or EXPERIMENTS.  For each entry,
-    looks up its Reddit posts in REDDIT_POSTS by label.  When an entry
-    has no Reddit posts, emits a single (target, entry, None) tuple at
-    the global default time so the check still runs at a known slot.
-    """
-    out = []
-    for source in items_source:
-        label = source[label_key]
-        cfg = REDDIT_POSTS.get(label)
-        post_list = cfg if isinstance(cfg, list) else ([cfg] if cfg else [])
-        if not post_list:
-            target = next_occurrence(
-                _DEFAULT_SCHEDULE_WEEKDAY,
-                _DEFAULT_SCHEDULE_HOUR,
-                _DEFAULT_SCHEDULE_MINUTE,
-                _DEFAULT_SCHEDULE_TZ,
-            )
-            out.append((target, source, None))
+        # --- Fetch counts ---
+        if kind == "survey":
+            fetch_ok, count_text = _fetch_survey(source, last_counts, updated_counts, log)
         else:
-            for post in post_list:
-                out.append((_post_target_dt(post), source, post))
-    out.sort(key=lambda triple: triple[0])
-    return out
+            fetch_ok, count_text = _fetch_experiment(source, last_counts, updated_counts, log)
 
+        if not fetch_ok:
+            # Send error and skip the post for this slot.
+            label = source["label"]
+            _telegram_safe(f"[study-bot ERROR] {label}: {count_text}", log)
+            _save_last_counts(updated_counts)
+            continue
 
-def _run_surveys(log, last_counts: dict, updated_counts: dict, args) -> None:
-    items = _build_post_items(SURVEYS, "label")
-    surveys_checked = set()
-    for target, survey, post in items:
-        if not _wait_for_post(target, log, args):
-            return
-        label = survey["label"]
-        if label not in surveys_checked:
-            _check_one_survey(survey, last_counts, updated_counts, log)
-            surveys_checked.add(label)
+        # --- Open Reddit tab + click flow ---
         if post is not None:
-            _open_one_post(label, post, log)
+            subreddit = post["subreddit"]
+            try:
+                result: PostResult = reddit_prefill(
+                    subreddit=subreddit,
+                    title=post["title"],
+                    post_type=post.get("post_type", "link"),
+                    link_url=post.get("link_url", ""),
+                    body=post.get("body", ""),
+                    flair=post.get("flair", ""),
+                    auto_click_add=(False if args.dry_run else bool(post.get("auto_click_add", False))),
+                    auto_post=(False if args.dry_run else bool(post.get("auto_post", False))),
+                    dry_run=args.dry_run,
+                    stop_event=stop_event,
+                )
+            except Exception as exc:
+                result = PostResult(
+                    tab_opened=False,
+                    reason=f"prefill() raised: {exc}",
+                    dry_run=args.dry_run,
+                )
+                log.warning("reddit_prefill error: %s\n%s", exc, traceback.format_exc())
+
+            post_line = f"Posted: r/{subreddit} {result.summary_line()}"
+            log.info(post_line)
+
+            # One combined Telegram message: count + post result.
+            prefix = "[DRY-RUN] " if args.dry_run else ""
+            combined = f"{prefix}{count_text}\n{post_line}"
+
+            if not result.success and not args.dry_run:
+                _telegram_safe(f"[study-bot ERROR] {combined}", log)
+            else:
+                _telegram_safe(combined, log)
+        else:
+            # No Reddit post configured — send count only.
+            prefix = "[DRY-RUN] " if args.dry_run else ""
+            _telegram_safe(f"{prefix}{count_text}", log)
+
+        _save_last_counts(updated_counts)
 
 
-def _run_experiments(log, last_counts: dict, updated_counts: dict, args) -> None:
-    items = _build_post_items(EXPERIMENTS, "label")
-    experiments_checked = set()
-    for target, experiment, post in items:
-        if not _wait_for_post(target, log, args):
+def _run_forever(args: argparse.Namespace, log, stop_event: threading.Event) -> None:
+    last_counts = _load_last_counts()
+    updated_counts = dict(last_counts)
+    jitter = int(REDDIT_SETTINGS.get("jitter_seconds", 120))
+
+    sent_startup = False
+
+    while True:
+        if stop_event.is_set():
+            log.info("Stop requested at loop start; exiting")
             return
-        label = experiment["label"]
-        if label not in experiments_checked:
-            _check_one_experiment(experiment, last_counts, updated_counts, log)
-            experiments_checked.add(label)
-        if post is not None:
-            _open_one_post(label, post, log)
+
+        queue = _build_unified_queue(jitter)
+        if args.only:
+            queue = [q for q in queue if q[0] == args.only]
+
+        if not sent_startup:
+            first = queue[0][3] if queue else None
+            heartbeat = (
+                f"[study-bot] started ({len(queue)} slots, jitter ±{jitter}s"
+                + (f", --only={args.only}" if args.only else "")
+                + (", --dry-run" if args.dry_run else "")
+                + ")"
+                + (f"\nFirst slot: {_format_target(first)}" if first else "")
+                + "\nSend 'stop' here to halt the bot"
+            )
+            log.info(heartbeat.replace("\n", " | "))
+            _telegram_safe(heartbeat, log)
+            sent_startup = True
+
+        _process_queue(queue, args, last_counts, updated_counts, log, stop_event)
+
+        if stop_event.is_set():
+            log.info("Stop requested; exiting after queue")
+            return
+
+        if args.now:
+            log.info("--now: queue processed, exiting")
+            return
+
+        log.info("All slots for this cycle complete; rebuilding queue")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="study-bot",
         description=(
-            "Check survey / experiment counts, send a Telegram update, and "
-            "open Reddit submit tabs pre-filled with the configured posts. "
-            "By default, each post waits for its own scheduled slot before "
-            "running."
+            "Integrated scheduler + poster. Walks a weekly per-subreddit "
+            "slot table forever (rebuilt each cycle), checks survey/experiment "
+            "counts at each slot, sends Telegram updates, and opens Reddit "
+            "submit tabs that the companion userscript + OS-click driver "
+            "complete."
         ),
     )
-    parser.add_argument(
-        "mode",
-        choices=["survey", "experiment"],
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run_p = sub.add_parser("run", help="Start the scheduler.")
+    run_p.add_argument(
+        "--now", action="store_true",
+        help="Fire every slot immediately (no waits) and exit. Useful for testing.",
+    )
+    run_p.add_argument(
+        "--dry-run", action="store_true",
         help=(
-            "survey: run Google Sheets surveys + their Reddit posts. "
-            "experiment: run MySQL experiments + their Reddit posts."
+            "Open Reddit submit tabs to verify prefill content, but never "
+            "auto-click Add/Post/Submit-without-editing.  Telegram messages "
+            "are still sent (with [DRY-RUN] prefix)."
         ),
     )
-    parser.add_argument(
-        "--now",
-        action="store_true",
-        help=(
-            "Skip every scheduled wait and run all posts back-to-back "
-            "immediately (useful for testing)."
-        ),
+    run_p.add_argument(
+        "--only", choices=["survey", "experiment"], default=None,
+        help="Filter the queue to one kind only.",
     )
     return parser.parse_args(argv)
 
@@ -302,21 +443,24 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
 def main(argv: Optional[list] = None) -> None:
     args = _parse_args(argv)
     log = get_logger()
-    log.info("study-bot run started (mode=%s, now=%s)", args.mode, args.now)
+    log.info(
+        "study-bot %s (now=%s, dry_run=%s, only=%s)",
+        args.command, args.now, args.dry_run, args.only,
+    )
 
-    last_counts = _load_last_counts()
-    updated_counts = dict(last_counts)
+    stop_event = threading.Event()
+    start_stop_listener(stop_event, log)
 
-    if args.mode == "survey":
-        _run_surveys(log, last_counts, updated_counts, args)
-    elif args.mode == "experiment":
-        _run_experiments(log, last_counts, updated_counts, args)
-    else:
-        log.error("Unknown mode: %s", args.mode)
-        sys.exit(2)
+    try:
+        _run_forever(args, log, stop_event)
+    except KeyboardInterrupt:
+        log.info("study-bot interrupted by user (Ctrl+C)")
+    except Exception as exc:
+        log.error("study-bot crashed:\n%s", traceback.format_exc())
+        _telegram_safe(f"[study-bot CRASH] {exc}", log)
+        sys.exit(1)
 
-    _save_last_counts(updated_counts)
-    log.info("study-bot run finished")
+    log.info("study-bot exit")
 
 
 if __name__ == "__main__":

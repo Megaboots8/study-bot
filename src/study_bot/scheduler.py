@@ -10,6 +10,8 @@ post can have its own daily slot.
 from __future__ import annotations
 
 import logging
+import random
+import threading
 import time
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
@@ -65,12 +67,39 @@ def next_occurrence(
     return target_dt
 
 
-def wait_until(target: datetime, log: Optional[logging.Logger] = None) -> None:
+def apply_jitter(target: datetime, jitter_seconds: int) -> datetime:
+    """Return ``target`` with a uniform random offset applied.
+
+    The offset is drawn from a uniform distribution over
+    [-jitter_seconds, +jitter_seconds] (inclusive on both ends, integer
+    seconds).  ``jitter_seconds <= 0`` disables jitter and returns the
+    original target unchanged.
+
+    Used to spread the actual post-time around each scheduled slot so a
+    crawler can't predict the exact moment study-bot will post.
+    """
+    if jitter_seconds <= 0:
+        return target
+    delta = random.randint(-jitter_seconds, jitter_seconds)
+    return target + timedelta(seconds=delta)
+
+
+def wait_until(
+    target: datetime,
+    log: Optional[logging.Logger] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
     """Sleep until `target` (timezone-aware), checking once per minute.
 
     Re-checks the wall-clock every 60 s so that if the computer
     sleeps/suspends during the wait, we wake up reasonably close to the
     target instead of overshooting by the suspend duration.
+
+    If `stop_event` is given and becomes set before `target` is reached,
+    the function returns early.
+
+    Returns True if the target was reached normally, False if the wait was
+    interrupted by `stop_event`.
     """
     if log is None:
         log = logger
@@ -79,7 +108,7 @@ def wait_until(target: datetime, log: Optional[logging.Logger] = None) -> None:
     now = datetime.now(tz)
     total = (target - now).total_seconds()
     if total <= 0:
-        return
+        return True
 
     log.info(
         "Scheduled to run at %s (waiting %dh %dm)",
@@ -88,8 +117,17 @@ def wait_until(target: datetime, log: Optional[logging.Logger] = None) -> None:
         int((total % 3600) // 60),
     )
     while True:
+        if stop_event is not None and stop_event.is_set():
+            log.info("wait_until: stop_event set; aborting wait")
+            return False
         now = datetime.now(tz)
         remaining = (target - now).total_seconds()
         if remaining <= 0:
-            return
-        time.sleep(min(remaining, 60))
+            return True
+        chunk = min(remaining, 30)
+        if stop_event is not None:
+            # Use Event.wait() so the sleep is interrupted immediately when
+            # the stop_event fires rather than waiting until the chunk ends.
+            stop_event.wait(timeout=chunk)
+        else:
+            time.sleep(chunk)

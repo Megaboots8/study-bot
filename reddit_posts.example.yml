@@ -2,51 +2,58 @@
 # Copy this file to reddit_posts.yml, fill in your real post text, and
 # do NOT commit reddit_posts.yml (it is in .gitignore).
 #
-# Top-level key under "posts:" must exactly match the "label" field of
-# either a survey in SURVEYS or an experiment in EXPERIMENTS in
-# src/study_bot/config.py.  Surveys are processed by `study-bot survey`
-# and experiments are processed by `study-bot experiment`.
+# Top-level keys
+# --------------
+#   jitter_seconds: int
+#       Uniform random offset (in seconds) applied to each scheduled fire
+#       time, drawn from [-jitter_seconds, +jitter_seconds].  0 disables
+#       jitter.  Default: 120.
 #
-# The value is a LIST of post specs, so a single survey can be posted
-# to multiple subreddits, each with its own flair and scheduled time.
+#   posts: <map of label -> list of post specs>
+#       Each top-level key under "posts:" must exactly match the "label"
+#       field of a survey in SURVEYS or an experiment in EXPERIMENTS in
+#       src/study_bot/config.py.  Surveys and experiments are processed
+#       together by `study-bot run`; chronological order across both is
+#       maintained.
 #
-# Per-post fields:
-#   subreddit       (required)  — subreddit name without "r/"
-#   title           (required)  — Post title
-#   post_type       (optional)  — "link" (default) or "text"
-#   link_url        (link only) — URL filled into the Link URL field
-#   body            (optional)  — Body text (self-text for text posts,
+# Per-post fields
+# ---------------
+#   subreddit       (required)  - Subreddit name without "r/"
+#   title           (required)  - Post title
+#   post_type       (optional)  - "link" (default) or "text"
+#   link_url        (link only) - URL filled into the Link URL field
+#   body            (optional)  - Body text (self-text for text posts,
 #                                  optional body for link posts)
-#   flair           (optional)  — Exact flair text; requires the
+#   flair           (optional)  - Exact flair text; requires the
 #                                  Tampermonkey userscript (see README)
-#   auto_click_add  (optional)  — When true, study-bot OS-clicks the
-#                                  blue "Add" button in the flair dialog
-#                                  to commit the flair selection.
+#   auto_click_add  (optional)  - When true, study-bot OS-clicks the
+#                                  blue "Add" button in the flair dialog.
 #                                  Default: false.
-#   auto_post       (optional)  — When true (and auto_click_add is also
-#                                  true), study-bot additionally OS-clicks
-#                                  the composer's "Post" button and, if
-#                                  Reddit shows a rule-warning dialog,
-#                                  clicks "Submit without editing".
-#                                  Default: false.
-#   schedule        (optional)  — When set, the post waits until the
-#                                  next occurrence of this slot before
-#                                  opening.  Posts are run in
-#                                  chronological order; the survey /
-#                                  experiment check fires at the FIRST
-#                                  post's scheduled time.  Format:
-#                                      schedule:
-#                                        weekday: thursday   # mon|tue|...
-#                                        hour: 16
-#                                        minute: 5
-#                                        tz: America/New_York   # optional
-#                                  Falls back to the global default
-#                                  (see _DEFAULT_SCHEDULE_* in
-#                                  src/study_bot/__main__.py) when not
-#                                  set.
+#   auto_post       (optional)  - When true (and auto_click_add is true),
+#                                  study-bot also OS-clicks the composer's
+#                                  "Post" button and, if Reddit shows the
+#                                  rule-warning dialog, "Submit without
+#                                  editing".  Default: false.
+#   schedule        (optional)  - One of:
+#                                  - omitted: post is never fired (only
+#                                    its survey/experiment count check
+#                                    runs at the global default slot).
+#                                  - a single dict: post fires once per
+#                                    week at this slot.
+#                                  - a LIST of dicts: post fires once per
+#                                    week at each slot in the list.
+#                                  Slot dict shape:
+#                                     {weekday, hour, minute, tz}
+#                                  weekday is one of mon/tue/.../sun (case
+#                                  insensitive).  tz is optional, default
+#                                  America/New_York.
+#
+# Example: full week of posts for two studies x two subreddits
+# (matches the production schedule used by the operator)
+
+jitter_seconds: 120
 
 posts:
-  # Survey (keyed by SURVEYS label) — opened by `study-bot survey`.
   Photo Filter Preference Survey:
     - subreddit: SampleSize
       title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
@@ -57,9 +64,11 @@ posts:
       auto_click_add: true
       auto_post: true
       schedule:
-        weekday: thursday
-        hour: 16
-        minute: 5
+        - {weekday: monday,    hour: 12, minute: 5}
+        - {weekday: tuesday,   hour: 13, minute: 5}
+        - {weekday: wednesday, hour: 14, minute: 5}
+        - {weekday: thursday,  hour: 15, minute: 5}
+        - {weekday: friday,    hour: 16, minute: 5}
     - subreddit: takemysurvey
       title: "Which photos and filters look best? Takes about 2 minutes (Everyone)"
       post_type: link
@@ -69,11 +78,12 @@ posts:
       auto_click_add: true
       auto_post: true
       schedule:
-        weekday: thursday
-        hour: 16
-        minute: 8
+        - {weekday: monday,    hour: 12, minute: 15}
+        - {weekday: tuesday,   hour: 13, minute: 15}
+        - {weekday: wednesday, hour: 14, minute: 15}
+        - {weekday: thursday,  hour: 15, minute: 15}
+        - {weekday: friday,    hour: 16, minute: 15}
 
-  # Experiment (keyed by EXPERIMENTS label) — opened by `study-bot experiment`.
   qs_colorslider_v5:
     - subreddit: SampleSize
       title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
@@ -83,6 +93,12 @@ posts:
       flair: "Academic (Repost)"
       auto_click_add: true
       auto_post: true
+      schedule:
+        - {weekday: monday,    hour: 13, minute: 0}
+        - {weekday: tuesday,   hour: 14, minute: 0}
+        - {weekday: wednesday, hour: 15, minute: 0}
+        - {weekday: thursday,  hour: 16, minute: 0}
+        - {weekday: friday,    hour: 17, minute: 0}
     - subreddit: takemysurvey
       title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
       post_type: link
@@ -91,14 +107,9 @@ posts:
       flair: "Academic-Personal"
       auto_click_add: true
       auto_post: true
-
-  # Example: a text post.  Uncomment and adapt for self-text recruitment.
-  # Some Other Survey:
-  #   - subreddit: SampleSize
-  #     title: "Quick anonymous survey on X (≈3 min)"
-  #     post_type: text
-  #     body: |
-  #       Hi r/SampleSize, we're running a brief study on X.
-  #       Survey link in comments. Thanks!
-  #     flair: "Academic (Repost)"
-  #     auto_click_add: true
+      schedule:
+        - {weekday: monday,    hour: 13, minute: 10}
+        - {weekday: tuesday,   hour: 14, minute: 10}
+        - {weekday: wednesday, hour: 15, minute: 10}
+        - {weekday: thursday,  hour: 16, minute: 10}
+        - {weekday: friday,    hour: 17, minute: 10}

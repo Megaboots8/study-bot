@@ -17,6 +17,10 @@ The tool:
 
 No Reddit credentials, database credentials, API keys, or private survey data are stored in this repository.
 
+For Windows always-on setup (disable sleep, Task Scheduler at logon,
+long-lived Google OAuth refresh tokens), see
+[`docs/windows-setup.md`](docs/windows-setup.md).
+
 ## Setup
 
 **1. Create and activate a virtual environment**
@@ -61,77 +65,91 @@ Make sure `credentials.json` (your Google OAuth client secrets file) is in the p
 
 **4. Run**
 
-study-bot has two modes — pick the one matching the study you want to
-check and post:
+study-bot is a single always-running scheduler:
 
 ```powershell
-study-bot survey       # Google Sheets surveys + their Reddit posts
-study-bot experiment   # MySQL experiments + their Reddit posts
+study-bot run                       # production: forever loop, schedule
+study-bot run --now                 # testing: fire every slot back-to-back, exit
+study-bot run --dry-run             # opens tabs but does NOT auto-submit
+study-bot run --only survey         # filter to surveys only
+study-bot run --only experiment     # filter to experiments only
 ```
 
-(or `python -m study_bot survey` / `python -m study_bot experiment`)
+(or `python -m study_bot run ...`)
 
-The repo also ships two batch wrappers, `run-study-bot-survey.bat` and
-`run-study-bot-experiment.bat`, plus desktop shortcuts named
-`study-bot (survey)` and `study-bot (experiment)`.
+The repo also ships a batch wrapper, [`run-study-bot.bat`](run-study-bot.bat),
+which is what Windows Task Scheduler invokes at logon (see
+[`docs/windows-setup.md`](docs/windows-setup.md)).
 
-The **first run in survey mode** opens a browser window to authorize
-Google Sheets access. After you approve, `token.json` is saved and
-subsequent runs are fully silent.
+The **first run** opens a browser window to authorize Google Sheets
+access. After you approve, `token.json` is saved and subsequent runs
+are fully silent. To stop weekly OAuth re-auth, see the OAuth section
+of [`docs/windows-setup.md`](docs/windows-setup.md).
 
 ### Scheduling
 
-Each Reddit post entry in `reddit_posts.yml` may carry its own
-`schedule:` block:
+Schedule lives in `reddit_posts.yml` (gitignored). Each post may carry
+a `schedule:` field with one or more weekly slots:
 
 ```yaml
-schedule:
-  weekday: thursday      # mon|tue|wed|thu|fri|sat|sun (case-insensitive)
-  hour: 16
-  minute: 5
-  tz: America/New_York   # optional, defaults to America/New_York
+jitter_seconds: 120     # actual fire times are randomised by ±120 s
+
+posts:
+  Photo Filter Preference Survey:
+    - subreddit: SampleSize
+      title: "..."
+      flair: "Marketing (Repost)"
+      auto_click_add: true
+      auto_post: true
+      schedule:
+        - {weekday: monday,    hour: 12, minute: 5}
+        - {weekday: tuesday,   hour: 13, minute: 5}
+        - {weekday: wednesday, hour: 14, minute: 5}
+        - {weekday: thursday,  hour: 15, minute: 5}
+        - {weekday: friday,    hour: 16, minute: 5}
+    - subreddit: takemysurvey
+      ...
+      schedule:
+        - {weekday: monday, hour: 12, minute: 15}
+        - ...
 ```
 
-When you run `study-bot survey` (or `experiment`), the program builds a
-chronological list of all scheduled posts for that mode and processes
-them one at a time:
+`weekday` is one of `mon|tue|wed|thu|fri|sat|sun` (case-insensitive).
+`tz` is optional and defaults to `America/New_York`. A single dict
+(no leading `-`) is accepted for backward compatibility and is
+treated as a one-slot list.
 
-1. Wait until the first post's slot.
-2. Run the survey check + send the Telegram update.
-3. Open and submit the first post (if auto-clicking is enabled).
-4. Wait until the next post's slot, open + submit, etc.
+`study-bot run` builds a chronological queue across BOTH surveys and
+experiments at startup. For each slot it waits, runs the appropriate
+count check, sends the Telegram update, then opens the Reddit submit
+tab. After the last slot of the week, the queue rebuilds (slots roll
+forward to next week) and the loop continues forever.
 
-The survey/experiment check fires once per run (at the first post's
-slot), so all posts in that run share the same fresh count.
+The wait re-checks the wall-clock once a minute, so the run still
+fires close to the right time even if your computer briefly sleeps
+during the wait.
 
-Posts that omit `schedule:` fall back to a global default (Thursday
-15:50 America/New_York — see `_DEFAULT_SCHEDULE_*` in
-`src/study_bot/__main__.py`).  Surveys with no Reddit posts at all
-still run at the global default time.
+`--now` skips every wait and fires the entire queue back-to-back, then
+exits — useful for testing.
 
-If today is the target weekday and the time has not yet passed, the
-slot fires today; otherwise next week.  The wait re-checks the
-wall-clock once a minute, so the run still fires close to the right
-time even if your computer briefly sleeps during the wait.
+`--dry-run` still opens each Reddit submit tab so you can visually
+verify the prefilled content, but forces `auto_click_add` and
+`auto_post` off so nothing is actually submitted. Telegram messages
+are sent with a `[DRY-RUN]` prefix.
 
-To skip every wait and run all posts back-to-back (useful for
-testing), pass `--now`:
+`--only survey` / `--only experiment` filters the queue.
 
-```powershell
-study-bot survey --now
-study-bot experiment --now
-```
+### Telegram heartbeat and alerts
 
-The desktop shortcuts run *with* the schedule (no `--now`).  When you
-double-click one, you'll see a line like
-
-```
-Scheduled to run at 2026-05-14 16:05 EDT (waiting 167h 12m)
-```
-
-and the cmd window stays open until each slot fires.  Closing the
-window or rebooting cancels any unfired slots; relaunch the shortcut
-afterwards.
+- On startup study-bot sends a one-line `[study-bot] started ...`
+  Telegram message that includes the queue length, jitter setting, and
+  the first scheduled slot.
+- On every slot success it sends the count message (with `[DRY-RUN]`
+  prefix in dry-run mode).
+- On any per-slot failure it sends `[study-bot ERROR] <label>: <reason>`
+  and continues to the next slot.
+- On unhandled crash it sends `[study-bot CRASH] <reason>` and exits;
+  Task Scheduler restarts it automatically.
 
 ### Auto-posting
 
@@ -140,38 +158,34 @@ true`, study-bot does the entire submit flow without you touching the
 mouse:
 
 1. Opens the prefilled submit tab.
-2. The Tampermonkey userscript opens the flair dialog and selects the
-   matching radio.
-3. study-bot OS-clicks the dialog's blue "Add" button to commit the
-   flair.
-4. study-bot OS-clicks the composer's blue "Post" button.
-5. If Reddit shows a "Your post may break these subreddit rules"
-   warning dialog, study-bot clicks the gray "Submit without editing"
-   button (computed at a measured pixel offset to the LEFT of the
-   warning's blue "Edit Post" button).
+2. The Tampermonkey userscript opens the flair dialog, selects the
+   matching radio, and writes button screen-coordinates into
+   `document.title` as `[SBP:<phase>:<x>,<y>]`.
+3. Python polls the foreground-window title and OS-clicks each phase:
+   flair **Add**, then **Post**, then **Submit without editing** if
+   the rule-warning dialog appears.
 
 Each step is gated on the foreground window's title containing
 "reddit" or "r/", so the bot won't click anywhere if you've switched
-to another window.  Each step is also best-effort: a missed step
+to another window. Each step is also best-effort: a missed step
 leaves the dialog/composer in place for you to finish manually, and
 the rest of the run continues.
 
-## What each mode does
+`--dry-run` opens the tab so you can verify content but forces
+auto_click_add and auto_post off; nothing is submitted.
 
-### `study-bot survey`
+## What each kind does
 
-For each configured survey in `SURVEYS`:
+For each configured **survey** in `SURVEYS`:
 - Reads column A of the `Form Responses 1` sheet.
 - Computes `response_count = len(rows) - 1` (skips the header row).
 - Sends a Telegram message: `"<Survey Name> # of responses = X (increased by N)"`.
-- For every entry under that survey's label in `reddit_posts.yml`,
-  opens a Reddit submit tab pre-filled with title, link/body, and flair
-  (see "Reddit pre-fill setup" below).
+- For every matching post in `reddit_posts.yml`, opens a Reddit submit
+  tab pre-filled with title, link/body, and flair (see "Reddit pre-fill
+  setup" below).
 - On error: sends `"[study-bot ERROR] <Survey Name>: <error details>"`.
 
-### `study-bot experiment`
-
-For each configured experiment in `EXPERIMENTS`:
+For each configured **experiment** in `EXPERIMENTS`:
 - Opens an SSH tunnel to the database server in-process (no manual
   tunnel needed, works after reboot).
 - Queries the experiment table for total row count and
@@ -183,10 +197,10 @@ For each configured experiment in `EXPERIMENTS`:
   Completed = 140 (increased by 1)
   ```
 
-- For every entry under that experiment's label in `reddit_posts.yml`,
-  opens a Reddit submit tab the same way as for surveys.
+- For every matching post in `reddit_posts.yml`, opens a Reddit submit
+  tab the same way.
 
-Every run appends a timestamped entry to `logs/study-bot.log`.
+Every run appends timestamped entries to `logs/study-bot.log`.
 
 ## Reddit pre-fill setup
 
