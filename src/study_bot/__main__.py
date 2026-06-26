@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
 import threading
 import traceback
@@ -60,6 +61,28 @@ from .scheduler import apply_jitter, next_occurrence, wait_until
 from .sheets import get_response_count
 
 _STATE_FILE = Path(__file__).resolve().parents[2] / "logs" / "last_counts.json"
+
+# Loopback socket held for the lifetime of the process; acts as an OS-managed
+# single-instance lock (released automatically on exit / crash).
+_INSTANCE_PORT = 47_832
+_instance_socket: socket.socket | None = None
+
+
+def _acquire_instance_lock() -> None:
+    """Exit immediately if another study-bot process is already running."""
+    global _instance_socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        sock.bind(("127.0.0.1", _INSTANCE_PORT))
+    except OSError:
+        print(
+            "study-bot is already running (port 47832 in use). "
+            "Stop the existing instance before starting a new one.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    _instance_socket = sock  # keep alive for the process lifetime
 
 # Default schedule for posts (or surveys/experiments without a Reddit post)
 # that omit a `schedule:` block entirely.
@@ -441,6 +464,7 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list] = None) -> None:
+    _acquire_instance_lock()
     args = _parse_args(argv)
     log = get_logger()
     log.info(

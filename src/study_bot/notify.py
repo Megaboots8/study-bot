@@ -32,6 +32,11 @@ _API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 _AUTHORIZED_CHAT_ID = int(TELEGRAM_CHAT_ID)
 
 
+def _redact(text) -> str:
+    """Replace the bot token in `text` so it is never written to the log."""
+    return str(text).replace(TELEGRAM_BOT_TOKEN, "<token>")
+
+
 def send_telegram(text: str) -> None:
     url = f"{_API}/sendMessage"
     response = requests.post(
@@ -79,7 +84,7 @@ def _listener_loop(
         try:
             updates = _get_updates(offset, timeout_secs=25)
         except Exception as exc:
-            log.debug("TelegramStopListener: getUpdates error (%s); retrying in 5 s", exc)
+            log.debug("TelegramStopListener: getUpdates error (%s); retrying in 5 s", _redact(exc))
             time.sleep(5)
             continue
 
@@ -106,7 +111,7 @@ def _listener_loop(
                         "[study-bot] stop received — exiting after current slot completes"
                     )
                 except Exception as exc:
-                    log.debug("TelegramStopListener: could not send confirmation: %s", exc)
+                    log.debug("TelegramStopListener: could not send confirmation: %s", _redact(exc))
                 return  # exit the listener thread
 
     log.debug("TelegramStopListener: stop_event already set, exiting listener")
