@@ -84,13 +84,13 @@ posts:
         - {weekday: thursday,  hour: 15, minute: 15}
         - {weekday: friday,    hour: 16, minute: 15}
 
-  qs_colorslider_v5:
+  Camera Roll Overload Survey:
     - subreddit: SampleSize
-      title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
+      title: "Too Many Photos? Survey on Camera Roll Overload (18+)"
       post_type: link
-      link_url: "https://example.org/your-experiment"
+      link_url: "https://forms.gle/your-survey-here"
       body: "Short pitch shown in the optional body field of the link post."
-      flair: "Academic (Repost)"
+      flair: "Marketing (Repost)"
       auto_click_add: true
       auto_post: true
       schedule:
@@ -100,11 +100,11 @@ posts:
         - {weekday: thursday,  hour: 16, minute: 0}
         - {weekday: friday,    hour: 17, minute: 0}
     - subreddit: takemysurvey
-      title: "Study on how you see colors (18+, no epilepsy, no color vision deficiency)"
+      title: "Too Many Photos? Survey on Camera Roll Overload (18+)"
       post_type: link
-      link_url: "https://example.org/your-experiment"
+      link_url: "https://forms.gle/your-survey-here"
       body: "Short pitch shown in the optional body field of the link post."
-      flair: "Academic-Personal"
+      flair: "Personal"
       auto_click_add: true
       auto_post: true
       schedule:
